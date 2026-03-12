@@ -89,7 +89,7 @@ jobs:
           cache: true
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8 # NOSONAR
+        uses: golangci/golangci-lint-action@v9 # NOSONAR
         with:
           version: v2.4.0
 

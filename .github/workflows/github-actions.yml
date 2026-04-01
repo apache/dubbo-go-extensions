@@ -112,7 +112,7 @@ jobs:
           go test ./... -race -coverprofile=coverage.txt -covermode=atomic
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4 # NOSONAR
+        uses: codecov/codecov-action@v6 # NOSONAR
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           file: ./coverage.txt

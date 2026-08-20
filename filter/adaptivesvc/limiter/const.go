@@ -17,13 +17,16 @@
 
 package limiter
 
-import (
-	"time"
+type HillClimbingOption int64
+
+const (
+	HillClimbingLimiter = iota
 )
 
-func minDuration(lhs, rhs time.Duration) time.Duration {
-	if lhs < rhs {
-		return lhs
-	}
-	return rhs
-}
+const (
+	HillClimbingOptionShrinkPlus HillClimbingOption = iota - 2
+	HillClimbingOptionShrink
+	HillClimbingOptionDoNothing
+	HillClimbingOptionExtend
+	HillClimbingOptionExtendPlus
+)

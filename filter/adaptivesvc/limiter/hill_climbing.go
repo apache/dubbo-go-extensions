@@ -24,22 +24,13 @@ import (
 )
 
 import (
+	"github.com/dubbogo/gost/log/logger"
 	"go.uber.org/atomic"
 )
 
 var (
 	_ Limiter = (*HillClimbing)(nil)
 	_ Updater = (*HillClimbingUpdater)(nil)
-)
-
-type HillClimbingOption int64
-
-const (
-	HillClimbingOptionShrinkPlus HillClimbingOption = -2
-	HillClimbingOptionShrink     HillClimbingOption = -1
-	HillClimbingOptionDoNothing  HillClimbingOption = 0
-	HillClimbingOptionExtend     HillClimbingOption = 1
-	HillClimbingOptionExtendPlus HillClimbingOption = 2
 )
 
 var (
@@ -129,7 +120,7 @@ func NewHillClimbingUpdater(limiter *HillClimbing) *HillClimbingUpdater {
 		limiter:   limiter,
 		seq:       limiter.seq.Add(1) - 1,
 	}
-	VerboseDebugf("[NewHillClimbingUpdater] A new request arrived, seq: %d, inflight: %d, time: %s.",
+	logger.Debugf("[Filter][AdaptiveSvc] [NewHillClimbingUpdater] A new request arrived, seq: %d, inflight: %d, time: %s.",
 		u.seq, inflight, u.startTime)
 	return u
 }
@@ -138,7 +129,7 @@ func (u *HillClimbingUpdater) DoUpdate() error {
 	defer func() {
 		u.limiter.inflight.Dec()
 	}()
-	VerboseDebugf("[HillClimbingUpdater] A request finished, the limiter will be updated, seq: %d.", u.seq)
+	logger.Debugf("[Filter][AdaptiveSvc] [HillClimbingUpdater] A request finished, the limiter will be updated, seq: %d.", u.seq)
 
 	rtt := uint64(time.Since(u.startTime).Milliseconds())
 	inflight := u.limiter.Inflight()
@@ -177,7 +168,7 @@ func (u *HillClimbingUpdater) getOption(rtt, _ uint64) (HillClimbingOption, erro
 		// FIXME(justxuewei): If all requests in one round not receive responses, rttAvg will be 0, and maxCapacity will
 		//  be 0 as well, the actual maxCapacity, however, is not 0.
 		maxCapacity := float64(transactionNum) * float64(updateInterval.Milliseconds()) / rttAvg
-		VerboseDebugf("[HillClimbingUpdater] maxCapacity: %f, transactionNum: %d, rttAvg: %f, bestRTTAvg: %f, "+
+		logger.Debugf("[Filter][AdaptiveSvc] [HillClimbingUpdater] maxCapacity: %f, transactionNum: %d, rttAvg: %f, bestRTTAvg: %f, "+
 			"updateInterval: %d",
 			maxCapacity, transactionNum, rttAvg, u.limiter.bestRTTAvg.Load(), updateInterval.Milliseconds())
 
@@ -191,11 +182,11 @@ func (u *HillClimbingUpdater) getOption(rtt, _ uint64) (HillClimbingOption, erro
 		}
 
 		tps := uint64(1000.0 * float64(transactionNum) / float64(updateInterval.Milliseconds()))
-		VerboseDebugf("[HillClimbingUpdater] The TPS is %d, transactionNum: %d, updateInterval: %d.",
+		logger.Debugf("[Filter][AdaptiveSvc] [HillClimbingUpdater] The TPS is %d, transactionNum: %d, updateInterval: %d.",
 			tps, transactionNum, updateInterval)
 
 		if tps > u.limiter.bestTPS.Load() {
-			VerboseDebugf("[HillClimbingUpdater] The best TPS is updated from %d to %d.",
+			logger.Debugf("[Filter][AdaptiveSvc] [HillClimbingUpdater] The best TPS is updated from %d to %d.",
 				u.limiter.bestTPS.Load(), tps)
 			// tps is the best in the history, update
 			// all best metrics.
@@ -203,13 +194,13 @@ func (u *HillClimbingUpdater) getOption(rtt, _ uint64) (HillClimbingOption, erro
 			u.limiter.bestRTTAvg.Store(rttAvg)
 			u.limiter.bestMaxCapacity.Store(maxCapacity)
 			u.limiter.bestLimitation.Store(u.limiter.limitation.Load())
-			VerboseDebugf("[HillClimbingUpdater] Best-metrics are up-to-date, "+
+			logger.Debugf("[Filter][AdaptiveSvc] [HillClimbingUpdater] Best-metrics are up-to-date, "+
 				"seq: %d, bestTPS: %d, bestRTTAvg: %.4f, bestMaxCapacity: %d,"+
 				" bestLimitation: %d.", u.seq, u.limiter.bestTPS.Load(),
 				u.limiter.bestRTTAvg.Load(), u.limiter.bestMaxCapacity.Load(),
 				u.limiter.bestLimitation.Load())
 		} else {
-			VerboseDebugf("[HillClimbingUpdater] The best TPS is not updated, best TPS is %d, "+
+			logger.Debugf("[Filter][AdaptiveSvc] [HillClimbingUpdater] The best TPS is not updated, best TPS is %d, "+
 				"the current TPS is %d",
 				u.limiter.bestTPS.Load(), tps)
 			if u.shouldShrink(transactionNum, maxCapacity, tps, rttAvg) {
@@ -229,7 +220,7 @@ func (u *HillClimbingUpdater) getOption(rtt, _ uint64) (HillClimbingOption, erro
 		u.limiter.transactionNum.Store(0)
 		u.limiter.rttAvg.Store(float64(rtt))
 		u.limiter.lastUpdatedTime.Store(time.Now())
-		VerboseDebugf("[HillClimbingUpdater] A new round is applied, all metrics are reset.")
+		logger.Debugf("[Filter][AdaptiveSvc] [HillClimbingUpdater] A new round is applied, all metrics are reset.")
 	} else {
 		// still on the current round
 
@@ -251,7 +242,7 @@ func (u *HillClimbingUpdater) shouldShrink(transactionNum uint64, maxCapacity fl
 	diff := bestMaxCapacity - maxCapacity
 	diffPct := uint64(100.0 * diff / bestMaxCapacity)
 
-	VerboseDebugf("[HillClimbingUpdater] shouldShrink maxCapacity diff: %f, diffPct: %d.", diff, diffPct)
+	logger.Debugf("[Filter][AdaptiveSvc] [HillClimbingUpdater] shouldShrink maxCapacity diff: %f, diffPct: %d.", diff, diffPct)
 
 	if diff <= 300 && diffPct <= 10 {
 		// diff is acceptable, shouldn't shrink
@@ -285,7 +276,7 @@ func (u *HillClimbingUpdater) shouldShrink(transactionNum uint64, maxCapacity fl
 			rttAvgDiffPctThreshold = 5
 		}
 
-		VerboseDebugf("[HillClimbingUpdater] shouldShrink bestRTTAvg: %d, rttAvgDiff: %d, rttAvgDiffPct: %d, "+
+		logger.Debugf("[Filter][AdaptiveSvc] [HillClimbingUpdater] shouldShrink bestRTTAvg: %d, rttAvgDiff: %d, rttAvgDiffPct: %d, "+
 			"rttAvgDiffThreshold: %d, rttAvgDiffPctThreshold: %d.", bestRTTAvg, rttAvgDiff, rttAvgDiffPct,
 			rttAvgDiffPctThreshold, rttAvgDiffPctThreshold)
 
@@ -298,7 +289,7 @@ func (u *HillClimbingUpdater) shouldShrink(transactionNum uint64, maxCapacity fl
 
 func (u *HillClimbingUpdater) adjustLimitation(option HillClimbingOption) error {
 	if option == HillClimbingOptionDoNothing {
-		VerboseDebugf("[HillClimbingUpdater] The option is do nothing, the limitation will not be updated.")
+		logger.Debugf("[Filter][AdaptiveSvc] [HillClimbingUpdater] The option is do nothing, the limitation will not be updated.")
 		return nil
 	}
 
@@ -310,7 +301,7 @@ func (u *HillClimbingUpdater) adjustLimitation(option HillClimbingOption) error 
 	beta := 0.8 * math.Log(limitation)
 	logUpdateInterval := math.Max(1.0, math.Log2(float64(updateInterval.Milliseconds())/1000.0))
 
-	VerboseDebugf("[HillClimbingUpdater] Before calculating new limitation, option: %d, limitation: %f, "+
+	logger.Debugf("[Filter][AdaptiveSvc] [HillClimbingUpdater] Before calculating new limitation, option: %d, limitation: %f, "+
 		"bestLimitation: %f, alpha: %f, beta: %f, logUpdateInterval: %f, updateInterval: %d", option, limitation,
 		bestLimitation, alpha, beta, logUpdateInterval, updateInterval.Milliseconds())
 
@@ -327,6 +318,6 @@ func (u *HillClimbingUpdater) adjustLimitation(option HillClimbingOption) error 
 
 	limitation = math.Max(1.0, math.Min(limitation, float64(maxLimitation)))
 	u.limiter.limitation.Store(uint64(limitation))
-	VerboseDebugf("[HillClimbingUpdater] The limitation is update from %d to %d.", uint64(oldLimitation), uint64(limitation))
+	logger.Debugf("[Filter][AdaptiveSvc] [HillClimbingUpdater] The limitation is update from %d to %d.", uint64(oldLimitation), uint64(limitation))
 	return nil
 }

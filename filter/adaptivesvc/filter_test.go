@@ -35,13 +35,11 @@ import (
 	"dubbo.apache.org/dubbo-go/v3/common/constant"
 	"dubbo.apache.org/dubbo-go/v3/common/extension"
 	"dubbo.apache.org/dubbo-go/v3/filter"
-	"dubbo.apache.org/dubbo-go/v3/global"
 	"dubbo.apache.org/dubbo-go/v3/protocol/base"
 	"dubbo.apache.org/dubbo-go/v3/protocol/invocation"
 	"dubbo.apache.org/dubbo-go/v3/protocol/mock"
 	"dubbo.apache.org/dubbo-go/v3/protocol/result"
 	"github.com/apache/dubbo-go-extensions/filter/adaptivesvc/limiter"
-	internaladaptive "github.com/apache/dubbo-go-extensions/internal/adaptivesvc"
 )
 
 type mockUpdater struct {
@@ -89,7 +87,7 @@ func TestAdaptiveServiceProviderFilter_Invoke(t *testing.T) {
 
 	t.Run("AdaptiveEnabled_AcquireSuccess", func(t *testing.T) {
 		invoc := invocation.NewRPCInvocation(methodName, nil, map[string]any{
-			internaladaptive.EnabledKey: internaladaptive.EnabledValue,
+			constant.AdaptiveServiceEnabledKey: constant.AdaptiveServiceIsEnabled,
 		})
 		invoker := mock.NewMockInvoker(ctrl)
 		invoker.EXPECT().GetURL().Return(u).AnyTimes()
@@ -98,34 +96,8 @@ func TestAdaptiveServiceProviderFilter_Invoke(t *testing.T) {
 		res := filter.Invoke(context.Background(), invoker, invoc)
 		require.NoError(t, res.Error())
 
-		updater, _ := invoc.GetAttribute(internaladaptive.UpdaterKey)
+		updater, _ := invoc.GetAttribute(constant.AdaptiveServiceUpdaterKey)
 		assert.NotNil(t, updater)
-	})
-
-	t.Run("AdaptiveEnabled_UsesProviderVerboseConfiguration", func(t *testing.T) {
-		oldVerbose := limiter.Verbose
-		t.Cleanup(func() {
-			limiter.Verbose = oldVerbose
-		})
-		limiter.Verbose = false
-
-		verboseURL, err := common.NewURL("dubbo://127.0.0.1:20000/com.test.VerboseService")
-		require.NoError(t, err)
-		verboseURL.SetAttribute(constant.ProviderConfigKey, &global.ProviderConfig{
-			AdaptiveService:        true,
-			AdaptiveServiceVerbose: true,
-		})
-
-		invoc := invocation.NewRPCInvocation(methodName, nil, map[string]any{
-			internaladaptive.EnabledKey: internaladaptive.EnabledValue,
-		})
-		invoker := mock.NewMockInvoker(ctrl)
-		invoker.EXPECT().GetURL().Return(verboseURL).AnyTimes()
-		invoker.EXPECT().Invoke(gomock.Any(), gomock.Any()).Return(&result.RPCResult{Rest: "ok"})
-
-		res := filter.Invoke(context.Background(), invoker, invoc)
-		require.NoError(t, res.Error())
-		assert.True(t, limiter.Verbose)
 	})
 
 	t.Run("AdaptiveEnabled_LimiterReached", func(t *testing.T) {
@@ -139,14 +111,14 @@ func TestAdaptiveServiceProviderFilter_Invoke(t *testing.T) {
 		limiterMapperSingleton.mapper[key] = alwaysLimitLimiter{}
 
 		invoc := invocation.NewRPCInvocation(methodName, nil, map[string]any{
-			internaladaptive.EnabledKey: internaladaptive.EnabledValue,
+			constant.AdaptiveServiceEnabledKey: constant.AdaptiveServiceIsEnabled,
 		})
 		invoker := mock.NewMockInvoker(ctrl)
 		invoker.EXPECT().GetURL().Return(u).AnyTimes()
 
 		res := filter.Invoke(context.Background(), invoker, invoc)
 		require.Error(t, res.Error())
-		assert.True(t, internaladaptive.DoesAdaptiveServiceReachLimitation(res.Error()))
+		assert.EqualError(t, res.Error(), "adaptive service interrupted: reach limitation")
 	})
 }
 
@@ -179,7 +151,7 @@ func TestAdaptiveServiceProviderFilter_OnResponse(t *testing.T) {
 	t.Run("MissingUpdater", func(t *testing.T) {
 		invoc := invocation.NewRPCInvocation(methodName, nil, nil)
 		res := &result.RPCResult{Rest: "ok"}
-		res.AddAttachment(internaladaptive.EnabledKey, internaladaptive.EnabledValue)
+		res.AddAttachment(constant.AdaptiveServiceEnabledKey, constant.AdaptiveServiceIsEnabled)
 		invoker := mock.NewMockInvoker(ctrl)
 
 		ret := filter.OnResponse(context.Background(), res, invoker, invoc)
@@ -188,9 +160,9 @@ func TestAdaptiveServiceProviderFilter_OnResponse(t *testing.T) {
 
 	t.Run("UnexpectedUpdaterType", func(t *testing.T) {
 		invoc := invocation.NewRPCInvocation(methodName, nil, nil)
-		invoc.SetAttribute(internaladaptive.UpdaterKey, "bad updater")
+		invoc.SetAttribute(constant.AdaptiveServiceUpdaterKey, "bad updater")
 		res := &result.RPCResult{Rest: "ok"}
-		res.AddAttachment(internaladaptive.EnabledKey, []string{internaladaptive.EnabledValue})
+		res.AddAttachment(constant.AdaptiveServiceEnabledKey, []string{constant.AdaptiveServiceIsEnabled})
 		invoker := mock.NewMockInvoker(ctrl)
 
 		ret := filter.OnResponse(context.Background(), res, invoker, invoc)
@@ -200,9 +172,9 @@ func TestAdaptiveServiceProviderFilter_OnResponse(t *testing.T) {
 	t.Run("UpdaterError", func(t *testing.T) {
 		updateErr := errors.New("update failed")
 		invoc := invocation.NewRPCInvocation(methodName, nil, nil)
-		invoc.SetAttribute(internaladaptive.UpdaterKey, &mockUpdater{err: updateErr})
+		invoc.SetAttribute(constant.AdaptiveServiceUpdaterKey, &mockUpdater{err: updateErr})
 		res := &result.RPCResult{Rest: "ok"}
-		res.AddAttachment(internaladaptive.EnabledKey, internaladaptive.EnabledValue)
+		res.AddAttachment(constant.AdaptiveServiceEnabledKey, constant.AdaptiveServiceIsEnabled)
 		invoker := mock.NewMockInvoker(ctrl)
 
 		ret := filter.OnResponse(context.Background(), res, invoker, invoc)
@@ -212,10 +184,10 @@ func TestAdaptiveServiceProviderFilter_OnResponse(t *testing.T) {
 	t.Run("SuccessWithAttachments", func(t *testing.T) {
 		invoc := invocation.NewRPCInvocation(methodName, nil, nil)
 		updater := &mockUpdater{}
-		invoc.SetAttribute(internaladaptive.UpdaterKey, updater)
+		invoc.SetAttribute(constant.AdaptiveServiceUpdaterKey, updater)
 
 		res := &result.RPCResult{Rest: "ok"}
-		res.AddAttachment(internaladaptive.EnabledKey, internaladaptive.EnabledValue)
+		res.AddAttachment(constant.AdaptiveServiceEnabledKey, constant.AdaptiveServiceIsEnabled)
 
 		invoker := mock.NewMockInvoker(ctrl)
 		invoker.EXPECT().GetURL().Return(u).AnyTimes()
@@ -225,8 +197,8 @@ func TestAdaptiveServiceProviderFilter_OnResponse(t *testing.T) {
 		ret := filter.OnResponse(context.Background(), res, invoker, invoc)
 
 		require.NoError(t, ret.Error())
-		assert.NotEmpty(t, ret.Attachment(internaladaptive.RemainingKey, ""))
-		assert.NotEmpty(t, ret.Attachment(internaladaptive.InflightKey, ""))
+		assert.NotEmpty(t, ret.Attachment(constant.AdaptiveServiceRemainingKey, ""))
+		assert.NotEmpty(t, ret.Attachment(constant.AdaptiveServiceInflightKey, ""))
 		assert.True(t, updater.called)
 	})
 }
@@ -242,12 +214,12 @@ func (dummyFilter) OnResponse(context.Context, result.Result, base.Invoker, base
 }
 
 func TestAdaptiveServiceProviderFilter_RegistrationOverwrite(t *testing.T) {
-	extension.SetFilter(internaladaptive.ProviderFilterKey, func() filter.Filter {
+	extension.SetFilter(constant.AdaptiveServiceProviderFilterKey, func() filter.Filter {
 		return dummyFilter{}
 	})
 
 	require.NotPanics(t, registerAdaptiveServiceProviderFilter)
-	registered, ok := extension.GetFilter(internaladaptive.ProviderFilterKey)
+	registered, ok := extension.GetFilter(constant.AdaptiveServiceProviderFilterKey)
 	require.True(t, ok)
 	assert.IsType(t, &adaptiveServiceProviderFilter{}, registered)
 }

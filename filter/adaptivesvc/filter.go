@@ -35,18 +35,16 @@ import (
 	"dubbo.apache.org/dubbo-go/v3/common/constant"
 	"dubbo.apache.org/dubbo-go/v3/common/extension"
 	"dubbo.apache.org/dubbo-go/v3/filter"
-	"dubbo.apache.org/dubbo-go/v3/global"
 	"dubbo.apache.org/dubbo-go/v3/protocol/base"
 	"dubbo.apache.org/dubbo-go/v3/protocol/result"
 	"github.com/apache/dubbo-go-extensions/filter/adaptivesvc/limiter"
-	internaladaptive "github.com/apache/dubbo-go-extensions/internal/adaptivesvc"
 )
 
 var (
 	adaptiveServiceProviderFilterOnce sync.Once
 	instance                          filter.Filter
 
-	ErrAdaptiveSvcInterrupted = fmt.Errorf(internaladaptive.AdaptiveServiceInterruptedMessage)
+	ErrAdaptiveSvcInterrupted = fmt.Errorf("adaptive service interrupted")
 	ErrUpdaterNotFound        = fmt.Errorf("updater not found")
 	ErrUnexpectedUpdaterType  = fmt.Errorf("unexpected updater type")
 )
@@ -56,7 +54,7 @@ func init() {
 }
 
 func registerAdaptiveServiceProviderFilter() {
-	extension.SetFilter(internaladaptive.ProviderFilterKey, newAdaptiveServiceProviderFilter)
+	extension.SetFilter(constant.AdaptiveServiceProviderFilterKey, newAdaptiveServiceProviderFilter)
 }
 
 // adaptiveServiceProviderFilter is for adaptive service on the provider side.
@@ -73,13 +71,11 @@ func newAdaptiveServiceProviderFilter() filter.Filter {
 
 func (f *adaptiveServiceProviderFilter) Invoke(ctx context.Context, invoker base.Invoker,
 	invocation base.Invocation) result.Result {
-	if invocation.GetAttachmentWithDefaultValue(internaladaptive.EnabledKey, "") !=
-		internaladaptive.EnabledValue {
+	if invocation.GetAttachmentWithDefaultValue(constant.AdaptiveServiceEnabledKey, "") !=
+		constant.AdaptiveServiceIsEnabled {
 		// the adaptive service is enabled on the invocation
 		return invoker.Invoke(ctx, invocation)
 	}
-	configureLimiterVerbose(invoker)
-
 	l, err := limiterMapperSingleton.getMethodLimiter(invoker.GetURL(), invocation.MethodName())
 	if err != nil {
 		if errors.Is(err, ErrLimiterNotFoundOnMapper) {
@@ -100,26 +96,14 @@ func (f *adaptiveServiceProviderFilter) Invoke(ctx context.Context, invoker base
 		return &result.RPCResult{Err: wrapErrAdaptiveSvcInterrupted(err)}
 	}
 
-	invocation.SetAttribute(internaladaptive.UpdaterKey, updater)
+	invocation.SetAttribute(constant.AdaptiveServiceUpdaterKey, updater)
 	return invoker.Invoke(ctx, invocation)
-}
-
-func configureLimiterVerbose(invoker base.Invoker) {
-	providerConfigRaw, ok := invoker.GetURL().GetAttribute(constant.ProviderConfigKey)
-	if !ok {
-		return
-	}
-	providerConfig, ok := providerConfigRaw.(*global.ProviderConfig)
-	if !ok || !providerConfig.AdaptiveServiceVerbose {
-		return
-	}
-	limiter.Verbose = true
 }
 
 func (f *adaptiveServiceProviderFilter) OnResponse(_ context.Context, res result.Result, invoker base.Invoker,
 	invocation base.Invocation) result.Result {
 	var asEnabled string
-	asEnabledIface := res.Attachment(internaladaptive.EnabledKey, nil)
+	asEnabledIface := res.Attachment(constant.AdaptiveServiceEnabledKey, nil)
 	if asEnabledIface != nil {
 		if str, strOK := asEnabledIface.(string); strOK {
 			asEnabled = str
@@ -127,7 +111,7 @@ func (f *adaptiveServiceProviderFilter) OnResponse(_ context.Context, res result
 			asEnabled = strArr[0]
 		}
 	}
-	if asEnabled != internaladaptive.EnabledValue {
+	if asEnabled != constant.AdaptiveServiceIsEnabled {
 		// the adaptive service is enabled on the invocation
 		return res
 	}
@@ -139,7 +123,7 @@ func (f *adaptiveServiceProviderFilter) OnResponse(_ context.Context, res result
 	}
 
 	// get updater from the attributes
-	updaterIface, _ := invocation.GetAttribute(internaladaptive.UpdaterKey)
+	updaterIface, _ := invocation.GetAttribute(constant.AdaptiveServiceUpdaterKey)
 	if updaterIface == nil {
 		logger.Errorf("[Filter][AdaptiveSvc] the updater is not found on the attributes, attrs=%#v",
 			invocation.Attributes())
@@ -165,11 +149,11 @@ func (f *adaptiveServiceProviderFilter) OnResponse(_ context.Context, res result
 	}
 
 	// set attachments to inform consumer of provider status
-	res.AddAttachment(internaladaptive.RemainingKey, fmt.Sprintf("%d", l.Remaining()))
-	res.AddAttachment(internaladaptive.InflightKey, fmt.Sprintf("%d", l.Inflight()))
+	res.AddAttachment(constant.AdaptiveServiceRemainingKey, fmt.Sprintf("%d", l.Remaining()))
+	res.AddAttachment(constant.AdaptiveServiceInflightKey, fmt.Sprintf("%d", l.Inflight()))
 	logger.Debugf("[Filter][AdaptiveSvc] the attachments are set, %s=%d %s=%d.",
-		internaladaptive.RemainingKey, l.Remaining(),
-		internaladaptive.InflightKey, l.Inflight())
+		constant.AdaptiveServiceRemainingKey, l.Remaining(),
+		constant.AdaptiveServiceInflightKey, l.Inflight())
 
 	return res
 }

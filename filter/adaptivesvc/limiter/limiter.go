@@ -19,17 +19,7 @@ package limiter
 
 import "fmt"
 
-import internaladaptive "github.com/apache/dubbo-go-extensions/internal/adaptivesvc"
-
-var ErrReachLimitation = fmt.Errorf(internaladaptive.ReachLimitationMessage)
-
-var (
-	Verbose = false
-)
-
-const (
-	HillClimbingLimiter = iota
-)
+var ErrReachLimitation = fmt.Errorf("reach limitation")
 
 type Limiter interface {
 	Inflight() uint64

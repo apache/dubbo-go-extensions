@@ -12,19 +12,25 @@ dubbo-go 提供者侧自适应服务限流扩展。
 go get github.com/apache/dubbo-go-extensions/filter/adaptivesvc
 ```
 
-通过副作用导入注册 provider filter：
+通过副作用导入注册 provider filter，然后使用 dubbo-go server option 启用
+adaptive service：
 
 ```go
 import (
     _ "github.com/apache/dubbo-go-extensions/filter/adaptivesvc"
+
+    "dubbo.apache.org/dubbo-go/v3/server"
 )
+
+func main() {
+    server.NewServer(
+        server.WithServerAdaptiveService(),
+    )
+}
 ```
 
-配置 provider filter key：
-
-```text
-padasvc
-```
+启用 adaptive service 后，dubbo-go 会自动将注册 key `padasvc` 加入 provider
+filter chain。
 
 provider filter 只在 invocation 携带 `adaptive-service.enabled=1` 时执行限流。启用后，它会使用 hill-climbing limiter，并通过响应 attachment 返回 provider 状态：
 

@@ -12,19 +12,25 @@ This extension keeps the same keys and behavior as the current built-in dubbo-go
 go get github.com/apache/dubbo-go-extensions/filter/adaptivesvc
 ```
 
-Register the provider filter with a side-effect import:
+Register the provider filter with a side-effect import, then enable adaptive
+service through the dubbo-go server option:
 
 ```go
 import (
     _ "github.com/apache/dubbo-go-extensions/filter/adaptivesvc"
+
+    "dubbo.apache.org/dubbo-go/v3/server"
 )
+
+func main() {
+    server.NewServer(
+        server.WithServerAdaptiveService(),
+    )
+}
 ```
 
-Configure the provider filter key:
-
-```text
-padasvc
-```
+When adaptive service is enabled, dubbo-go automatically adds the registered
+filter key `padasvc` to the provider filter chain.
 
 The provider filter only applies throttling when the invocation contains `adaptive-service.enabled=1`. When enabled, it uses the hill-climbing limiter and returns provider status through response attachments:
 

@@ -17,10 +17,20 @@
 
 package limiter
 
+import "time"
+
 type HillClimbingOption int64
 
 const (
 	HillClimbingLimiter = iota
+)
+
+const (
+	initialLimitation uint64 = 50
+	maxLimitation     uint64 = 500
+
+	radicalPeriod = 1000 * time.Millisecond
+	stablePeriod  = 32000 * time.Millisecond
 )
 
 const (

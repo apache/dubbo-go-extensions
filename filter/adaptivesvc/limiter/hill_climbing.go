@@ -33,14 +33,6 @@ var (
 	_ Updater = (*HillClimbingUpdater)(nil)
 )
 
-var (
-	initialLimitation uint64 = 50
-	maxLimitation     uint64 = 500
-
-	radicalPeriod = 1000 * time.Millisecond
-	stablePeriod  = 32000 * time.Millisecond
-)
-
 // HillClimbing is a limiter using HillClimbing algorithm
 type HillClimbing struct {
 	seq   *atomic.Uint64

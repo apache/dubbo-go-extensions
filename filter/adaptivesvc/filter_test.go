@@ -24,13 +24,6 @@ import (
 )
 
 import (
-	"github.com/golang/mock/gomock"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-)
-
-import (
 	"dubbo.apache.org/dubbo-go/v3/common"
 	"dubbo.apache.org/dubbo-go/v3/common/constant"
 	"dubbo.apache.org/dubbo-go/v3/common/extension"
@@ -39,7 +32,13 @@ import (
 	"dubbo.apache.org/dubbo-go/v3/protocol/invocation"
 	"dubbo.apache.org/dubbo-go/v3/protocol/mock"
 	"dubbo.apache.org/dubbo-go/v3/protocol/result"
+
 	"github.com/apache/dubbo-go-extensions/filter/adaptivesvc/limiter"
+
+	"github.com/golang/mock/gomock"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type mockUpdater struct {

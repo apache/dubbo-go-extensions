@@ -17,7 +17,9 @@
 
 package adaptivesvc
 
-import "strings"
+import (
+	"strings"
+)
 
 import (
 	"dubbo.apache.org/dubbo-go/v3/common/constant"

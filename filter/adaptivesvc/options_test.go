@@ -19,11 +19,13 @@ package adaptivesvc
 
 import (
 	"testing"
+)
 
-	"github.com/stretchr/testify/assert"
-
+import (
 	"dubbo.apache.org/dubbo-go/v3/global"
 	"dubbo.apache.org/dubbo-go/v3/server"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestWithServerAdaptiveService(t *testing.T) {

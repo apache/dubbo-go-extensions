@@ -17,7 +17,9 @@
 
 package limiter
 
-import "fmt"
+import (
+	"fmt"
+)
 
 var ErrReachLimitation = fmt.Errorf("reach limitation")
 

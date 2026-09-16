@@ -26,18 +26,17 @@ import (
 )
 
 import (
-	"github.com/dubbogo/gost/log/logger"
-
-	"github.com/pkg/errors"
-)
-
-import (
 	"dubbo.apache.org/dubbo-go/v3/common/constant"
 	"dubbo.apache.org/dubbo-go/v3/common/extension"
 	"dubbo.apache.org/dubbo-go/v3/filter"
 	"dubbo.apache.org/dubbo-go/v3/protocol/base"
 	"dubbo.apache.org/dubbo-go/v3/protocol/result"
+
 	"github.com/apache/dubbo-go-extensions/filter/adaptivesvc/limiter"
+
+	"github.com/dubbogo/gost/log/logger"
+
+	"github.com/pkg/errors"
 )
 
 var (

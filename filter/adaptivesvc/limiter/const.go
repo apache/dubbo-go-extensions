@@ -17,7 +17,9 @@
 
 package limiter
 
-import "time"
+import (
+	"time"
+)
 
 type HillClimbingOption int64
 

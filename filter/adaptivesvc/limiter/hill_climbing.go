@@ -25,6 +25,7 @@ import (
 
 import (
 	"github.com/dubbogo/gost/log/logger"
+
 	"go.uber.org/atomic"
 )
 

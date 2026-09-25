@@ -23,13 +23,16 @@ import (
 
 func main() {
     server.NewServer(
-        adaptivesvc.WithServerAdaptiveService(),
+        server.WithExtension(
+            adaptivesvc.WithAdaptiveService(),
+        ),
     )
 }
 ```
 
-导入扩展会注册 `padasvc` filter。扩展提供的 option 会将该 key 加入 provider
-filter chain，并保留已经配置的其他 filter。
+导入扩展会注册扩展配置和 `padasvc` filter。`server.WithExtension` 使用 server
+scope 初始化扩展，由 dubbo-go 将该 filter 合并到 provider filter chain，并保留
+已经配置的其他 filter。
 
 provider filter 只在 invocation 携带 `adaptive-service.enabled=1` 时执行限流。启用后，它会使用 hill-climbing limiter，并通过响应 attachment 返回 provider 状态：
 

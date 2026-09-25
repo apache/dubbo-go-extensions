@@ -49,6 +49,7 @@ var (
 )
 
 func init() {
+	extension.MustRegisterConfig(&Config{})
 	registerAdaptiveServiceProviderFilter()
 }
 

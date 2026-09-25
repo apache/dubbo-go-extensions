@@ -24,13 +24,16 @@ import (
 
 func main() {
     server.NewServer(
-        adaptivesvc.WithServerAdaptiveService(),
+        server.WithExtension(
+            adaptivesvc.WithAdaptiveService(),
+        ),
     )
 }
 ```
 
-Importing the extension registers the `padasvc` filter. The extension option
-adds that key to the provider filter chain without replacing filters that are
+Importing the extension registers its configuration and the `padasvc` filter.
+`server.WithExtension` initializes it with server scope, and dubbo-go merges
+the filter into the provider filter chain without replacing filters that are
 already configured.
 
 The provider filter only applies throttling when the invocation contains `adaptive-service.enabled=1`. When enabled, it uses the hill-climbing limiter and returns provider status through response attachments:

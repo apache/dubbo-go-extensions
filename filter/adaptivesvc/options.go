@@ -18,27 +18,60 @@
 package adaptivesvc
 
 import (
-	"strings"
+	"fmt"
 )
 
 import (
 	"dubbo.apache.org/dubbo-go/v3/common/constant"
-	"dubbo.apache.org/dubbo-go/v3/server"
+	"dubbo.apache.org/dubbo-go/v3/common/extension"
 )
 
-// WithServerAdaptiveService adds the adaptive service provider filter to the server filter chain.
-func WithServerAdaptiveService() server.ServerOption {
-	return func(opts *server.ServerOptions) {
-		for _, filterName := range strings.Split(opts.Provider.Filter, ",") {
-			if strings.TrimSpace(filterName) == constant.AdaptiveServiceProviderFilterKey {
-				return
-			}
-		}
+const adaptiveServiceExtensionName = "adaptive-service"
 
-		if opts.Provider.Filter == "" {
-			opts.Provider.Filter = constant.AdaptiveServiceProviderFilterKey
-			return
-		}
-		opts.Provider.Filter += "," + constant.AdaptiveServiceProviderFilterKey
+var (
+	_ extension.Config = (*Config)(nil)
+	_ extension.Option = adaptiveServiceOption{}
+)
+
+// Config defines the adaptive service extension configuration.
+type Config struct{}
+
+func (c *Config) Prefix() string {
+	return adaptiveServiceExtensionName
+}
+
+func (c *Config) New() extension.Config {
+	return &Config{}
+}
+
+func (c *Config) Init(scope extension.Scope) error {
+	if scope != extension.ServerScope {
+		return fmt.Errorf("adaptive service only supports server scope")
 	}
+	return nil
+}
+
+func (c *Config) FilterNames(scope extension.Scope) []string {
+	if scope != extension.ServerScope {
+		return nil
+	}
+	return []string{constant.AdaptiveServiceProviderFilterKey}
+}
+
+type adaptiveServiceOption struct{}
+
+func (adaptiveServiceOption) Prefix() string {
+	return adaptiveServiceExtensionName
+}
+
+func (adaptiveServiceOption) Apply(config extension.Config) error {
+	if _, ok := config.(*Config); !ok {
+		return fmt.Errorf("adaptive service received unexpected config type %T", config)
+	}
+	return nil
+}
+
+// WithAdaptiveService enables adaptive service for a dubbo-go server.
+func WithAdaptiveService() extension.Option {
+	return adaptiveServiceOption{}
 }

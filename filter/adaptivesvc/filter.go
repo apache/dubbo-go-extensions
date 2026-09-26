@@ -32,11 +32,13 @@ import (
 	"dubbo.apache.org/dubbo-go/v3/protocol/base"
 	"dubbo.apache.org/dubbo-go/v3/protocol/result"
 
-	"github.com/apache/dubbo-go-extensions/filter/adaptivesvc/limiter"
-
 	"github.com/dubbogo/gost/log/logger"
 
 	"github.com/pkg/errors"
+)
+
+import (
+	"github.com/apache/dubbo-go-extensions/filter/adaptivesvc/limiter"
 )
 
 var (

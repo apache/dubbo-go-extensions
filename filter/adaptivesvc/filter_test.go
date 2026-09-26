@@ -33,12 +33,14 @@ import (
 	"dubbo.apache.org/dubbo-go/v3/protocol/mock"
 	"dubbo.apache.org/dubbo-go/v3/protocol/result"
 
-	"github.com/apache/dubbo-go-extensions/filter/adaptivesvc/limiter"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"go.uber.org/mock/gomock"
+)
+
+import (
+	"github.com/apache/dubbo-go-extensions/filter/adaptivesvc/limiter"
 )
 
 type mockUpdater struct {

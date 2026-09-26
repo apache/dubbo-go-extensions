@@ -18,7 +18,10 @@
 package limiter
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 import (
@@ -50,21 +53,25 @@ func TestHillClimbing_Acquire(t *testing.T) {
 // Test the HillClimbingUpdater's DoUpdate method
 func TestHillClimbingUpdater_DoUpdate(t *testing.T) {
 	limiter := NewHillClimbing().(*HillClimbing)
-	updater := NewHillClimbingUpdater(limiter)
+	updater, err := limiter.Acquire()
+	require.NoError(t, err)
 
 	// Simulate the limiter update with arbitrary values for RTT and inflight
 	// Normally, this would adjust the limiter's limitation based on RTT and inflight metrics
-	err := updater.DoUpdate()
+	err = updater.DoUpdate()
 	assert.NoError(t, err)
 }
 
 // Test adjustLimitation method with different options
 func TestHillClimbingUpdater_AdjustLimitation(t *testing.T) {
 	limiter := NewHillClimbing().(*HillClimbing)
-	updater := NewHillClimbingUpdater(limiter)
+	acquired, err := limiter.Acquire()
+	require.NoError(t, err)
+	updater, ok := acquired.(*HillClimbingUpdater)
+	require.True(t, ok)
 
 	// Simulate a scenario where the limiter is set to extend its capacity
-	err := updater.adjustLimitation(HillClimbingOptionExtend)
+	err = updater.adjustLimitation(HillClimbingOptionExtend)
 	require.NoError(t, err)
 	assert.Greater(t, limiter.limitation.Load(), initialLimitation)
 
@@ -87,4 +94,46 @@ func TestHillClimbing_Remaining(t *testing.T) {
 	limiter.inflight.Store(120)
 	remaining = limiter.Remaining()
 	assert.Equal(t, uint64(0), remaining)
+}
+
+// TestHillClimbing_Acquire_ConcurrentCapacity verifies that concurrent Acquire calls
+// never admit more than the limitation while slots are held: every observation of
+// Inflight must stay within the limitation.
+func TestHillClimbing_Acquire_ConcurrentCapacity(t *testing.T) {
+	const (
+		limitation = 16
+		workers    = 64
+		iterations = 5000
+	)
+
+	limiter := NewHillClimbing().(*HillClimbing)
+	limiter.limitation.Store(limitation)
+	// freeze the rounds so DoUpdate never adjusts the limitation during the test
+	limiter.lastUpdatedTime.Store(time.Now().Add(time.Hour))
+
+	var (
+		violations atomic.Int64
+		wg         sync.WaitGroup
+	)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				updater, err := limiter.Acquire()
+				if err != nil {
+					assert.ErrorIs(t, err, ErrReachLimitation)
+					continue
+				}
+				if limiter.Inflight() > limitation {
+					violations.Add(1)
+				}
+				assert.NoError(t, updater.DoUpdate())
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.Zero(t, violations.Load())
+	assert.Equal(t, uint64(0), limiter.Inflight())
 }

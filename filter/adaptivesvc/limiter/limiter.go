@@ -29,6 +29,7 @@ type Limiter interface {
 	// Acquire inspects the current status of the system:
 	// - if reaches the limitation, reject the request immediately.
 	// - if not, grant this request and return an Updater defined below.
+	// The capacity check and inflight reservation are performed atomically.
 	Acquire() (Updater, error)
 }
 

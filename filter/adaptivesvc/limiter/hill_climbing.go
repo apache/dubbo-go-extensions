@@ -89,10 +89,16 @@ func (l *HillClimbing) Remaining() uint64 {
 }
 
 func (l *HillClimbing) Acquire() (Updater, error) {
-	if l.Remaining() == 0 {
-		return nil, ErrReachLimitation
+	for {
+		limitation := l.limitation.Load()
+		inflight := l.inflight.Load()
+		if inflight >= limitation {
+			return nil, ErrReachLimitation
+		}
+		if l.inflight.CompareAndSwap(inflight, inflight+1) {
+			return newHillClimbingUpdater(l, inflight+1), nil
+		}
 	}
-	return NewHillClimbingUpdater(l), nil
 }
 
 type HillClimbingUpdater struct {
@@ -103,8 +109,7 @@ type HillClimbingUpdater struct {
 	seq uint64
 }
 
-func NewHillClimbingUpdater(limiter *HillClimbing) *HillClimbingUpdater {
-	inflight := limiter.inflight.Add(1)
+func newHillClimbingUpdater(limiter *HillClimbing, inflight uint64) *HillClimbingUpdater {
 	u := &HillClimbingUpdater{
 		startTime: time.Now(),
 		limiter:   limiter,

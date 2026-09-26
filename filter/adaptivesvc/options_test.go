@@ -30,6 +30,55 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+import (
+	"github.com/apache/dubbo-go-extensions/filter/adaptivesvc/limiter"
+)
+
+func TestVerboseConfiguration(t *testing.T) {
+	previous := limiter.VerboseEnabled()
+	t.Cleanup(func() { limiter.SetVerbose(previous) })
+
+	raw := map[string]any{
+		adaptiveServiceExtensionName: map[string]any{
+			"provider": map[string]any{"verbose": true},
+		},
+	}
+	_, err := extension.Initialize(raw, nil, extension.ServerScope)
+	require.NoError(t, err)
+	assert.True(t, limiter.VerboseEnabled())
+
+	_, err = extension.Initialize(raw,
+		[]extension.Option{WithAdaptiveService(WithVerbose(false))}, extension.ServerScope)
+	require.NoError(t, err)
+	assert.False(t, limiter.VerboseEnabled())
+
+	_, err = extension.Initialize(nil,
+		[]extension.Option{WithAdaptiveService(WithVerbose(true), WithVerbose(false), WithVerbose(true))},
+		extension.ServerScope)
+	require.NoError(t, err)
+	assert.True(t, limiter.VerboseEnabled())
+
+	_, err = extension.Initialize(nil,
+		[]extension.Option{WithAdaptiveService()}, extension.ServerScope)
+	require.NoError(t, err)
+	assert.False(t, limiter.VerboseEnabled())
+}
+
+func TestVerboseUnsupportedScopeHasNoSideEffect(t *testing.T) {
+	previous := limiter.VerboseEnabled()
+	t.Cleanup(func() { limiter.SetVerbose(previous) })
+	limiter.SetVerbose(false)
+	config := &Config{Verbose: true}
+	require.Error(t, config.Init(extension.ClientScope))
+	assert.False(t, limiter.VerboseEnabled())
+}
+
+func TestAdaptiveServiceOptionRejectsNilConfigAndOption(t *testing.T) {
+	var config *Config
+	assert.Error(t, WithAdaptiveService().Apply(config))
+	assert.Error(t, WithAdaptiveService(nil).Apply(&Config{}))
+}
+
 func TestConfigRegistered(t *testing.T) {
 	registered, ok := extension.LookupConfig(adaptiveServiceExtensionName)
 	require.True(t, ok)

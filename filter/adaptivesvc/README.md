@@ -4,8 +4,6 @@ English | [简体中文](./README_CN.md)
 
 Provider-side adaptive service throttling for dubbo-go.
 
-This extension keeps the same keys and behavior as the current built-in dubbo-go implementation, while letting applications depend on `github.com/apache/dubbo-go-extensions` explicitly.
-
 ## Installation
 
 ```bash
@@ -44,6 +42,31 @@ The provider filter only applies throttling when the invocation contains `adapti
 The consumer side must set the enable attachment on outgoing invocations and
 read the returned capacity attachments. Consumer-side adaptive service support
 is outside the scope of this provider extension.
+
+## Verbose Logs
+
+Detailed limiter logs are disabled by default. Enable them with:
+
+```go
+server.WithExtension(
+    adaptivesvc.WithAdaptiveService(adaptivesvc.WithVerbose(true)),
+)
+```
+
+For YAML configuration, import the extension and configure:
+
+```yaml
+dubbo:
+  extensions:
+    adaptive-service:
+      provider:
+        verbose: true
+```
+
+Typed options override YAML values. Verbose controls limiter logs for the entire
+process; the last successfully initialized adaptive-service config determines
+the setting. The logger must also enable debug output. The built-in dubbo-go
+verbose option does not configure this extension.
 
 ## Effect
 

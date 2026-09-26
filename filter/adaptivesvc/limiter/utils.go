@@ -18,8 +18,31 @@
 package limiter
 
 import (
+	"sync/atomic"
 	"time"
 )
+
+import (
+	"github.com/dubbogo/gost/log/logger"
+)
+
+var verbose atomic.Bool
+
+// SetVerbose controls detailed limiter logs for the process.
+func SetVerbose(enabled bool) {
+	verbose.Store(enabled)
+}
+
+// VerboseEnabled reports whether detailed limiter logs are enabled.
+func VerboseEnabled() bool {
+	return verbose.Load()
+}
+
+func verboseDebugf(format string, args ...any) {
+	if verbose.Load() {
+		logger.Debugf(format, args...)
+	}
+}
 
 func minDuration(lhs, rhs time.Duration) time.Duration {
 	if lhs < rhs {

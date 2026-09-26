@@ -23,8 +23,37 @@ import (
 )
 
 import (
+	"github.com/dubbogo/gost/log/logger"
+
 	"github.com/stretchr/testify/assert"
 )
+
+type verboseTestLogger struct {
+	logger.Logger
+	calls int
+}
+
+func (l *verboseTestLogger) Debugf(string, ...any) {
+	l.calls++
+}
+
+func TestVerboseDebugf(t *testing.T) {
+	previousLogger := logger.GetLogger()
+	previousVerbose := VerboseEnabled()
+	t.Cleanup(func() {
+		logger.SetLogger(previousLogger)
+		SetVerbose(previousVerbose)
+	})
+	capture := &verboseTestLogger{Logger: previousLogger}
+	logger.SetLogger(capture)
+
+	SetVerbose(false)
+	verboseDebugf("disabled")
+	assert.Equal(t, 0, capture.calls)
+	SetVerbose(true)
+	verboseDebugf("enabled")
+	assert.Equal(t, 1, capture.calls)
+}
 
 func TestMinDuration(t *testing.T) {
 	// Test when lhs is smaller than rhs

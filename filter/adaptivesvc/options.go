@@ -24,6 +24,12 @@ import (
 import (
 	"dubbo.apache.org/dubbo-go/v3/common/constant"
 	"dubbo.apache.org/dubbo-go/v3/common/extension"
+
+	"github.com/dubbogo/gost/log/logger"
+)
+
+import (
+	"github.com/apache/dubbo-go-extensions/filter/adaptivesvc/limiter"
 )
 
 const adaptiveServiceExtensionName = "adaptive-service"
@@ -34,7 +40,9 @@ var (
 )
 
 // Config defines the adaptive service extension configuration.
-type Config struct{}
+type Config struct {
+	Verbose bool `yaml:"verbose"`
+}
 
 func (c *Config) Prefix() string {
 	return adaptiveServiceExtensionName
@@ -46,8 +54,10 @@ func (c *Config) New() extension.Config {
 
 func (c *Config) Init(scope extension.Scope) error {
 	if scope != extension.ServerScope {
+		logger.Errorf("[Filter][AdaptiveSvc] initialization failed: unsupported scope %d; only server scope is supported", scope)
 		return fmt.Errorf("adaptive service only supports server scope")
 	}
+	limiter.SetVerbose(c.Verbose)
 	return nil
 }
 
@@ -58,20 +68,37 @@ func (c *Config) FilterNames(scope extension.Scope) []string {
 	return []string{constant.AdaptiveServiceProviderFilterKey}
 }
 
-type adaptiveServiceOption struct{}
+// ConfigOption configures provider-side adaptive service.
+type ConfigOption func(*Config)
+
+// WithVerbose controls detailed limiter logs. The logger must also enable debug output.
+func WithVerbose(enabled bool) ConfigOption {
+	return func(config *Config) { config.Verbose = enabled }
+}
+
+type adaptiveServiceOption struct {
+	options []ConfigOption
+}
 
 func (adaptiveServiceOption) Prefix() string {
 	return adaptiveServiceExtensionName
 }
 
-func (adaptiveServiceOption) Apply(config extension.Config) error {
-	if _, ok := config.(*Config); !ok {
+func (option adaptiveServiceOption) Apply(config extension.Config) error {
+	adaptiveConfig, ok := config.(*Config)
+	if !ok || adaptiveConfig == nil {
 		return fmt.Errorf("adaptive service received unexpected config type %T", config)
+	}
+	for _, apply := range option.options {
+		if apply == nil {
+			return fmt.Errorf("adaptive service config option is nil")
+		}
+		apply(adaptiveConfig)
 	}
 	return nil
 }
 
 // WithAdaptiveService enables adaptive service for a dubbo-go server.
-func WithAdaptiveService() extension.Option {
-	return adaptiveServiceOption{}
+func WithAdaptiveService(options ...ConfigOption) extension.Option {
+	return adaptiveServiceOption{options: append([]ConfigOption(nil), options...)}
 }

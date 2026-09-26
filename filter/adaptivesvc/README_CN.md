@@ -4,8 +4,6 @@
 
 dubbo-go 提供者侧自适应服务限流扩展。
 
-该扩展保留当前 dubbo-go 内置实现的 key 和行为，同时允许应用显式依赖 `github.com/apache/dubbo-go-extensions`。
-
 ## 安装
 
 ```bash
@@ -40,6 +38,30 @@ provider filter 只在 invocation 携带 `adaptive-service.enabled=1` 时执行�
 - `adaptive-service.inflight`
 
 consumer 侧需要在发出的 invocation 上设置启用 attachment，并读取 provider 返回的容量 attachment。consumer 侧 adaptive service 支持不在本 provider extension 的范围内。
+
+## Verbose 日志
+
+limiter 的详细日志默认关闭，可通过 typed option 启用：
+
+```go
+server.WithExtension(
+    adaptivesvc.WithAdaptiveService(adaptivesvc.WithVerbose(true)),
+)
+```
+
+使用 YAML 时，导入扩展并配置：
+
+```yaml
+dubbo:
+  extensions:
+    adaptive-service:
+      provider:
+        verbose: true
+```
+
+typed option 会覆盖 YAML 配置。Verbose 控制整个进程的 limiter 日志，以最后一次
+成功初始化的 adaptive-service 配置为准；日志级别也需要开启 debug。dubbo-go 主仓
+内置的 verbose option 不会配置本扩展。
 
 ## 限流效果
 

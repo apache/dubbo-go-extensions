@@ -21,11 +21,8 @@ import (
 	"math"
 	"sync"
 	"time"
-)
 
-import (
 	"github.com/dubbogo/gost/log/logger"
-
 	"go.uber.org/atomic"
 )
 
@@ -209,6 +206,9 @@ func (u *HillClimbingUpdater) getOption(rtt, _ uint64) (HillClimbingOption, erro
 			}
 		}
 
+		verboseDebugf("[Filter][AdaptiveSvc] round evaluated: rtt_ms=%.4f tps=%d inflight=%d limitation=%d option=%d interval_ms=%d",
+			rttAvg, tps, u.limiter.Inflight(), limitation, option, updateInterval.Milliseconds())
+
 		// reset metrics for the new round
 		u.limiter.transactionNum.Store(0)
 		u.limiter.rttAvg.Store(float64(rtt))
@@ -311,6 +311,9 @@ func (u *HillClimbingUpdater) adjustLimitation(option HillClimbingOption) error 
 
 	limitation = math.Max(1.0, math.Min(limitation, float64(maxLimitation)))
 	u.limiter.limitation.Store(uint64(limitation))
-	logger.Debugf("[Filter][AdaptiveSvc] [HillClimbingUpdater] The limitation is update from %d to %d.", uint64(oldLimitation), uint64(limitation))
+	if uint64(oldLimitation) != uint64(limitation) {
+		verboseDebugf("[Filter][AdaptiveSvc] limitation changed: option=%d old=%d new=%d",
+			option, uint64(oldLimitation), uint64(limitation))
+	}
 	return nil
 }

@@ -76,15 +76,23 @@ provider filter before entering the business handler. The limit is adjusted
 from observed throughput and request latency, which keeps in-flight work within
 the capacity learned for that method.
 
-In the provider protection experiment from
-[dubbo-go#3347](https://github.com/apache/dubbo-go/pull/3347), a client used 200
-concurrent requests against a handler that took 200 ms. One sample at 10 seconds
-reported 610 successful requests, 180 throttled requests, no other failures,
-and a maximum of 53 requests executing in the handler concurrently:
+In one provider protection experiment, the setup was: 200 client concurrency,
+200 ms provider handler delay, 30 s duration. One sample at 10 seconds is
+shown below:
 
-```text
-elapsed=10s started=840 success=610 rejected=180 failed=0 qps=61.0 reject_rate=21.4% avg=205ms p95=240ms server_active=50 server_max_active=53
-```
+| Metric | Value |
+| ------ | ----- |
+| elapsed | 10s |
+| started | 840 |
+| success | 610 |
+| rejected | 180 |
+| failed | 0 |
+| qps | 61.0 |
+| reject_rate | 21.4% |
+| avg | 205ms |
+| p95 | 240ms |
+| server_active | 50 |
+| server_max_active | 53 |
 
 The exact limit and rejection rate vary with workload and latency; the expected
 effect is that excess requests are throttled before business execution instead

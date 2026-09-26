@@ -69,14 +69,22 @@ limiter 会为每个服务方法维护独立的自适应并发上限。当方法
 provider filter 会在请求进入业务处理逻辑前将其拒绝。该上限会根据实际吞吐量和请求
 延迟动态调整，从而把执行中的请求数控制在该方法当前可承受的容量内。
 
-在 [dubbo-go#3347](https://github.com/apache/dubbo-go/pull/3347) 的 provider
-保护实验中，客户端以 200 并发请求一个处理耗时为 200 ms 的方法。运行到第 10 秒时，
-一组示例结果为：成功 610 次、限流拒绝 180 次、其他失败为 0，进入业务处理逻辑的
-最大并发数为 53：
+在一次 provider 保护实验中，测试配置为：客户端 200 并发、provider 处理延迟
+200 ms、持续 30 s。运行到第 10 秒时，一组示例结果如下：
 
-```text
-elapsed=10s started=840 success=610 rejected=180 failed=0 qps=61.0 reject_rate=21.4% avg=205ms p95=240ms server_active=50 server_max_active=53
-```
+| 指标 | 数值 |
+| ---- | ---- |
+| elapsed | 10s |
+| started | 840 |
+| success | 610 |
+| rejected | 180 |
+| failed | 0 |
+| qps | 61.0 |
+| reject_rate | 21.4% |
+| avg | 205ms |
+| p95 | 240ms |
+| server_active | 50 |
+| server_max_active | 53 |
 
 实际并发上限和拒绝比例会随业务负载及请求延迟动态变化。预期效果是让超出容量的请求
 在进入业务逻辑前被限流，避免 provider 的执行并发无限增长。

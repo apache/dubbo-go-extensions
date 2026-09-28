@@ -21,8 +21,11 @@ import (
 	"math"
 	"sync"
 	"time"
+)
 
+import (
 	"github.com/dubbogo/gost/log/logger"
+
 	"go.uber.org/atomic"
 )
 

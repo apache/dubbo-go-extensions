@@ -107,16 +107,15 @@ func (f *Filter) Invoke(ctx context.Context, invoker base.Invoker, invocation ba
 		// Return fallback error
 		_, isCircuitOpen := err.(hystrix.CircuitError)
 		if isCircuitOpen {
-			logger.Debugf("[Hystrix Filter] Circuit opened for %s", resourceName)
+			logger.Debugf("[Hystrix Filter] Circuit opened for %s", cmdName)
 		} else {
-			logger.Debugf("[Hystrix Filter] Hystrix fallback for %s: %v", resourceName, err)
+			logger.Debugf("[Hystrix Filter] Hystrix fallback for %s: %v", cmdName, err)
 		}
-		fallbackResult := &result.RPCResult{}
-		fallbackResult.SetResult(nil)
-		fallbackResult.SetError(NewHystrixFilterError(err, isCircuitOpen))
 		resMu.Lock()
 		fallbackUsed = true
-		res = fallbackResult
+		res = &result.RPCResult{}
+		res.SetResult(nil)
+		res.SetError(NewHystrixFilterError(err, isCircuitOpen))
 		resMu.Unlock()
 		return err
 	})

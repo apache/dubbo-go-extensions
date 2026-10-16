@@ -15,20 +15,9 @@
  * limitations under the License.
  */
 
-// Package hystrix provides hystrix filter.
-// To use hystrix, you need to configure commands using hystrix-go API:
-//
-//	import "github.com/afex/hystrix-go/hystrix"
-//
-//	// Resource name format: dubbo:consumer:InterfaceName:group:version:Method
-//	// Example: dubbo:consumer:com.example.GreetService:::Greet
-//	hystrix.ConfigureCommand("dubbo:consumer:com.example.GreetService:::Greet", hystrix.CommandConfig{
-//	    Timeout:                1000,
-//	    MaxConcurrentRequests:  20,
-//	    RequestVolumeThreshold: 20,
-//	    SleepWindow:            5000,
-//	    ErrorPercentThreshold:  50,
-//	})
+// Package hystrix provides a Hystrix circuit-breaker filter configured through
+// the dubbo-go extension API. Command names use the Dubbo resource format
+// interface:group:version:method.
 
 package hystrix
 
@@ -36,6 +25,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 import (
@@ -52,18 +42,15 @@ import (
 )
 
 const (
-	// Filter keys
-	HystrixConsumerFilterKey = "hystrix_consumer"
-	HystrixProviderFilterKey = "hystrix_provider"
-
-	// Prefixes for resource naming
-	DefaultProviderPrefix = "dubbo:provider:"
-	DefaultConsumerPrefix = "dubbo:consumer:"
+	// Internal Hystrix command namespaces, not part of the extension config API.
+	internalProviderCommandPrefix = "dubbo:provider:"
+	internalConsumerCommandPrefix = "dubbo:consumer:"
 )
 
 func init() {
-	extension.SetFilter(HystrixConsumerFilterKey, newFilterConsumer)
-	extension.SetFilter(HystrixProviderFilterKey, newFilterProvider)
+	extension.MustRegisterConfig(&Config{})
+	extension.SetFilter(constant.HystrixConsumerFilterKey, newFilterConsumer)
+	extension.SetFilter(constant.HystrixProviderFilterKey, newFilterProvider)
 }
 
 // FilterError implements error interface
@@ -96,26 +83,46 @@ type Filter struct {
 
 // Invoke is an implementation of filter, provides Hystrix pattern latency and fault tolerance
 func (f *Filter) Invoke(ctx context.Context, invoker base.Invoker, invocation base.Invocation) result.Result {
-	cmdName := getResourceName(invoker, invocation, f.isConsumer)
+	resourceName := getResourceName(invoker, invocation)
+	scope := extension.ServerScope
+	if f.isConsumer {
+		scope = extension.ClientScope
+	}
+	cmdName := internalCommandName(scope, resourceName)
 
-	var res result.Result
+	var (
+		res          result.Result
+		resMu        sync.Mutex
+		fallbackUsed bool
+	)
 	err := hystrix.Do(cmdName, func() error {
-		res = invoker.Invoke(ctx, invocation)
-		return res.Error()
+		invokeResult := invoker.Invoke(ctx, invocation)
+		resMu.Lock()
+		if !fallbackUsed {
+			res = invokeResult
+		}
+		resMu.Unlock()
+		return invokeResult.Error()
 	}, func(err error) error {
 		// Return fallback error
 		_, isCircuitOpen := err.(hystrix.CircuitError)
 		if isCircuitOpen {
-			logger.Debugf("[Hystrix Filter] Circuit opened for %s", cmdName)
+			logger.Debugf("[Hystrix Filter] Circuit opened for %s", resourceName)
 		} else {
-			logger.Debugf("[Hystrix Filter] Hystrix fallback for %s: %v", cmdName, err)
+			logger.Debugf("[Hystrix Filter] Hystrix fallback for %s: %v", resourceName, err)
 		}
-		res = &result.RPCResult{}
-		res.SetResult(nil)
-		res.SetError(NewHystrixFilterError(err, isCircuitOpen))
+		fallbackResult := &result.RPCResult{}
+		fallbackResult.SetResult(nil)
+		fallbackResult.SetError(NewHystrixFilterError(err, isCircuitOpen))
+		resMu.Lock()
+		fallbackUsed = true
+		res = fallbackResult
+		resMu.Unlock()
 		return err
 	})
 
+	resMu.Lock()
+	defer resMu.Unlock()
 	if err != nil {
 		return res
 	}
@@ -137,15 +144,8 @@ func newFilterProvider() filter.Filter {
 	return &Filter{isConsumer: false}
 }
 
-func getResourceName(invoker base.Invoker, invocation base.Invocation, isConsumer bool) string {
+func getResourceName(invoker base.Invoker, invocation base.Invocation) string {
 	var sb strings.Builder
-
-	if isConsumer {
-		sb.WriteString(DefaultConsumerPrefix)
-	} else {
-		sb.WriteString(DefaultProviderPrefix)
-	}
-
 	// Format: interface:group:version:method
 	sb.WriteString(getColonSeparatedKey(invoker.GetURL()))
 	sb.WriteString(":")

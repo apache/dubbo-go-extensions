@@ -313,6 +313,53 @@ func TestAdaptiveServiceClusterInvoker_Availability(t *testing.T) {
 
 type dummyCluster struct{}
 
+func TestAdaptiveServiceClusterInvoker_GenericMethodMetrics(t *testing.T) {
+	u0, err := common.NewURL("dubbo://127.0.0.1:21000/" + t.Name())
+	require.NoError(t, err)
+	u1, err := common.NewURL("dubbo://127.0.0.1:21001/" + t.Name())
+	require.NoError(t, err)
+	providers := []protocolbase.Invoker{
+		newStubInvoker(u0, nil),
+		newStubInvoker(u1, nil),
+	}
+	genericInvocation := func(method string) *invocation.RPCInvocation {
+		return invocation.NewRPCInvocation(constant.Generic, []any{method, []string{}, []any{}}, nil)
+	}
+	cases := []struct {
+		method    string
+		remaining [2]uint64
+		preferred int
+	}{
+		{"Echo", [2]uint64{10, 30}, 1},
+		{"Lookup", [2]uint64{40, 5}, 0},
+	}
+	for _, tc := range cases {
+		for i, provider := range providers {
+			res := &result.RPCResult{Rest: "ok"}
+			res.AddAttachment(constant.AdaptiveServiceRemainingKey, fmt.Sprint(tc.remaining[i]))
+			provider.(*stubInvoker).res = res
+			caller := newAdaptiveServiceClusterInvoker(&stubDirectory{
+				url: provider.GetURL(), invokers: []protocolbase.Invoker{provider},
+			})
+			inv := genericInvocation(tc.method)
+			require.Equal(t, constant.Generic, inv.MethodName())
+			require.Equal(t, tc.method, inv.ActualMethodName())
+			require.NoError(t, caller.Invoke(context.Background(), inv).Error())
+		}
+	}
+	for _, tc := range cases {
+		for i, provider := range providers {
+			value, err := metrics.LocalMetrics.GetMethodMetrics(provider.GetURL(), tc.method, metrics.HillClimbing)
+			require.NoError(t, err)
+			require.Equal(t, tc.remaining[i], value)
+			_, err = metrics.LocalMetrics.GetMethodMetrics(provider.GetURL(), constant.Generic, metrics.HillClimbing)
+			require.ErrorIs(t, err, metrics.ErrMetricsNotFound)
+		}
+		lb := extension.GetLoadbalance(constant.LoadBalanceKeyP2C)
+		require.Same(t, providers[tc.preferred], lb.Select(providers, genericInvocation(tc.method)))
+	}
+}
+
 func (dummyCluster) Join(directory.Directory) protocolbase.Invoker {
 	return protocolbase.NewBaseInvoker(nil)
 }

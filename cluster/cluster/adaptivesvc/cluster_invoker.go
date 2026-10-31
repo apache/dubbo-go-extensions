@@ -52,6 +52,7 @@ func newAdaptiveServiceClusterInvoker(directory directory.Directory) protocolbas
 }
 
 func (ivk *adaptiveServiceClusterInvoker) Invoke(ctx context.Context, invocation protocolbase.Invocation) result.Result {
+	methodName := invocation.ActualMethodName()
 	invokers := ivk.Directory.List(invocation)
 	if err := ivk.CheckInvokers(invokers, invocation); err != nil {
 		return &result.RPCResult{Err: err}
@@ -115,7 +116,7 @@ func (ivk *adaptiveServiceClusterInvoker) Invoke(ctx context.Context, invocation
 	logger.Debugf("[Cluster][AdaptiveSvc] received server status, %s=%s",
 		constant.AdaptiveServiceRemainingKey, remainingStr)
 	err = metrics.LocalMetrics.SetMethodMetrics(invoker.GetURL(),
-		invocation.MethodName(), metrics.HillClimbing, uint64(remaining))
+		methodName, metrics.HillClimbing, uint64(remaining))
 	if err != nil {
 		logger.Warnf("[Cluster][AdaptiveSvc] update metrics failed, err=%v", err)
 		return &result.RPCResult{Err: err}

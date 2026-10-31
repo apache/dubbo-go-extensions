@@ -1,0 +1,145 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package adaptivesvc
+
+import (
+	"context"
+	"net/http"
+	"strconv"
+	"strings"
+)
+
+import (
+	"dubbo.apache.org/dubbo-go/v3/cluster/cluster/base"
+	"dubbo.apache.org/dubbo-go/v3/cluster/directory"
+	"dubbo.apache.org/dubbo-go/v3/common/constant"
+	"dubbo.apache.org/dubbo-go/v3/common/extension"
+	protocolbase "dubbo.apache.org/dubbo-go/v3/protocol/base"
+	"dubbo.apache.org/dubbo-go/v3/protocol/result"
+
+	"github.com/dubbogo/gost/log/logger"
+
+	perrors "github.com/pkg/errors"
+)
+
+import (
+	"github.com/apache/dubbo-go-extensions/cluster/metrics"
+)
+
+type adaptiveServiceClusterInvoker struct {
+	base.BaseClusterInvoker
+}
+
+func newAdaptiveServiceClusterInvoker(directory directory.Directory) protocolbase.Invoker {
+	return &adaptiveServiceClusterInvoker{
+		BaseClusterInvoker: base.NewBaseClusterInvoker(directory),
+	}
+}
+
+func (ivk *adaptiveServiceClusterInvoker) Invoke(ctx context.Context, invocation protocolbase.Invocation) result.Result {
+	methodName := invocation.ActualMethodName()
+	invokers := ivk.Directory.List(invocation)
+	if err := ivk.CheckInvokers(invokers, invocation); err != nil {
+		return &result.RPCResult{Err: err}
+	}
+
+	// get loadBalance
+	lbKey := invokers[0].GetURL().GetParam(constant.LoadbalanceKey, constant.LoadBalanceKeyP2C)
+	if lbKey != constant.LoadBalanceKeyP2C {
+		return &result.RPCResult{Err: perrors.Errorf("adaptive service not supports %s load balance", lbKey)}
+	}
+	lb := extension.GetLoadbalance(lbKey)
+
+	// Reselect when the preferred provider is unavailable.
+	invoker := ivk.DoSelect(lb, invocation, invokers, nil)
+	// DoSelect may return the original unavailable provider if reselection fails.
+	if invoker == nil || !invoker.IsAvailable() {
+		return &result.RPCResult{Err: perrors.New("adaptive service: no available provider")}
+	}
+
+	// Triple exposes unary response trailers through invocation attributes,
+	// rather than RPCResult attachments. Preserve the caller-provided target.
+	var responseTrailer *http.Header
+	callType, _ := invocation.GetAttribute(constant.CallTypeKey)
+	if invoker.GetURL().Protocol == constant.TriProtocol && callType == constant.CallUnary {
+		responseTrailer = prepareResponseTrailer(invocation)
+	}
+
+	// invoke
+	invocation.SetAttachment(constant.AdaptiveServiceEnabledKey, constant.AdaptiveServiceIsEnabled)
+	res := invoker.Invoke(ctx, invocation)
+
+	// if the adaptive service encounters an error, DO NOT
+	// update the metrics.
+	if isAdaptiveServiceFailed(res.Error()) {
+		return res
+	}
+
+	// update metrics
+	var remainingStr string
+	remainingIface := res.Attachment(constant.AdaptiveServiceRemainingKey, nil)
+	if remainingIface != nil {
+		if str, strOK := remainingIface.(string); strOK {
+			remainingStr = str
+		} else if strArr, strArrOK := remainingIface.([]string); strArrOK && len(strArr) > 0 {
+			remainingStr = strArr[0]
+		}
+	}
+	if remainingStr == "" && responseTrailer != nil {
+		remainingStr = responseTrailer.Get(constant.AdaptiveServiceRemainingKey)
+	}
+	if remainingStr == "" {
+		logger.Errorf("[Cluster][AdaptiveSvc] %s field type invalid, key=%s value=%v, expected string",
+			constant.AdaptiveServiceRemainingKey, constant.AdaptiveServiceRemainingKey, remainingIface)
+		return res
+	}
+	remaining, err := strconv.Atoi(remainingStr)
+	if err != nil {
+		logger.Warnf("[Cluster][AdaptiveSvc] parse remaining failed, remaining=%s err=%v, expected int", remainingStr, err)
+		return res
+	}
+	logger.Debugf("[Cluster][AdaptiveSvc] received server status, %s=%s",
+		constant.AdaptiveServiceRemainingKey, remainingStr)
+	err = metrics.LocalMetrics.SetMethodMetrics(invoker.GetURL(),
+		methodName, metrics.HillClimbing, uint64(remaining))
+	if err != nil {
+		logger.Warnf("[Cluster][AdaptiveSvc] update metrics failed, err=%v", err)
+		return &result.RPCResult{Err: err}
+	}
+
+	return res
+}
+
+func prepareResponseTrailer(invocation protocolbase.Invocation) *http.Header {
+	value, _ := invocation.GetAttribute(constant.ResponseTrailerKey)
+	trailer, ok := value.(*http.Header)
+	if !ok || trailer == nil {
+		trailer = new(http.Header)
+		invocation.SetAttribute(constant.ResponseTrailerKey, trailer)
+	}
+	// An early transport failure must not reuse metadata from a previous call.
+	*trailer = nil
+	return trailer
+}
+
+func isAdaptiveServiceFailed(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.HasPrefix(err.Error(), "adaptive service interrupted")
+}

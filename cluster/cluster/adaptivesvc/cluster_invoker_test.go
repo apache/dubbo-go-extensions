@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 )
 
@@ -312,6 +313,38 @@ func TestAdaptiveServiceClusterInvoker_Availability(t *testing.T) {
 }
 
 type dummyCluster struct{}
+
+func TestAdaptiveServiceClusterConcurrentFirstInitialization(t *testing.T) {
+	previous := instance
+	instance = nil
+	once = sync.Once{}
+	t.Cleanup(func() {
+		once = sync.Once{}
+		instance = nil
+		if previous != nil {
+			once.Do(func() { instance = previous })
+		}
+	})
+
+	const workers = 100
+	instances := make([]clusterpkg.Cluster, workers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			instances[i] = newAdaptiveServiceCluster()
+		}()
+	}
+	close(start)
+	wg.Wait()
+	require.NotNil(t, instances[0])
+	for _, got := range instances {
+		require.Same(t, instances[0], got)
+	}
+}
 
 func TestAdaptiveServiceClusterInvoker_GenericMethodMetrics(t *testing.T) {
 	u0, err := common.NewURL("dubbo://127.0.0.1:21000/" + t.Name())

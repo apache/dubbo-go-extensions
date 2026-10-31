@@ -46,11 +46,9 @@ func registerAdaptiveServiceCluster() {
 type adaptiveServiceCluster struct{}
 
 func newAdaptiveServiceCluster() clusterpkg.Cluster {
-	if instance == nil {
-		once.Do(func() {
-			instance = &adaptiveServiceCluster{}
-		})
-	}
+	once.Do(func() {
+		instance = &adaptiveServiceCluster{}
+	})
 	return instance
 }
 

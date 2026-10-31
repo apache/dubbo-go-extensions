@@ -97,11 +97,9 @@ func newP2CLoadBalance(r randomPicker) loadbalance.LoadBalance {
 	if r == nil {
 		r = defaultRnd
 	}
-	if instance == nil {
-		once.Do(func() {
-			instance = &p2cLoadBalance{randomPicker: r}
-		})
-	}
+	once.Do(func() {
+		instance = &p2cLoadBalance{randomPicker: r}
+	})
 	return instance
 }
 

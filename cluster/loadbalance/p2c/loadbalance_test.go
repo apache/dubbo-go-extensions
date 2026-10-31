@@ -18,6 +18,7 @@
 package p2c
 
 import (
+	"sync"
 	"testing"
 )
 
@@ -38,6 +39,38 @@ import (
 import (
 	"github.com/apache/dubbo-go-extensions/cluster/metrics"
 )
+
+func TestP2CConcurrentFirstInitialization(t *testing.T) {
+	previous := instance
+	instance = nil
+	once = sync.Once{}
+	t.Cleanup(func() {
+		once = sync.Once{}
+		instance = nil
+		if previous != nil {
+			once.Do(func() { instance = previous })
+		}
+	})
+
+	const workers = 100
+	instances := make([]loadbalance.LoadBalance, workers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			instances[i] = newP2CLoadBalance(nil)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	require.NotNil(t, instances[0])
+	for _, got := range instances {
+		require.Same(t, instances[0], got)
+	}
+}
 
 func TestDefaultRnd(t *testing.T) {
 	t.Run("n <= 1", func(t *testing.T) {

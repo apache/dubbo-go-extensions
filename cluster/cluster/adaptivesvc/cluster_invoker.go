@@ -63,8 +63,12 @@ func (ivk *adaptiveServiceClusterInvoker) Invoke(ctx context.Context, invocation
 	}
 	lb := extension.GetLoadbalance(lbKey)
 
-	// select a node by the loadBalance
-	invoker := lb.Select(invokers, invocation)
+	// Reselect when the preferred provider is unavailable.
+	invoker := ivk.DoSelect(lb, invocation, invokers, nil)
+	// DoSelect may return the original unavailable provider if reselection fails.
+	if invoker == nil || !invoker.IsAvailable() {
+		return &result.RPCResult{Err: perrors.New("adaptive service: no available provider")}
+	}
 
 	// invoke
 	invocation.SetAttachment(constant.AdaptiveServiceEnabledKey, constant.AdaptiveServiceIsEnabled)

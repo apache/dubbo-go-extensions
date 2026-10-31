@@ -150,8 +150,12 @@ func TestAdaptiveServiceClusterInvoker_UnsupportedLoadBalance(t *testing.T) {
 
 func TestAdaptiveServiceClusterInvoker_MetricsUpdate(t *testing.T) {
 	oldMetrics := metrics.LocalMetrics
+	oldLoadBalance := extension.GetLoadbalance(constant.LoadBalanceKeyP2C)
 	defer func() {
 		metrics.LocalMetrics = oldMetrics
+		extension.SetLoadbalance(constant.LoadBalanceKeyP2C, func() loadbalance.LoadBalance {
+			return oldLoadBalance
+		})
 	}()
 
 	u, err := common.NewURL("dubbo://127.0.0.1:20000/com.test.Service")
@@ -242,6 +246,69 @@ func TestAdaptiveServiceClusterInvoker_MetricsUpdate(t *testing.T) {
 		require.Error(t, res.Error())
 		assert.ErrorIs(t, res.Error(), writeErr)
 	})
+}
+
+func TestAdaptiveServiceClusterInvoker_Availability(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		available    []bool
+		destroyFirst bool
+		wantProvider int
+	}{
+		{"reselect healthy provider", []bool{false, true}, false, 1},
+		{"skip destroyed provider", []bool{false, true}, true, 1},
+		{"single unavailable provider", []bool{false}, false, -1},
+		{"all providers unavailable", []bool{false, false}, false, -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldMetrics := metrics.LocalMetrics
+			recorder := &recordingMetrics{}
+			metrics.LocalMetrics = recorder
+			t.Cleanup(func() { metrics.LocalMetrics = oldMetrics })
+
+			providers := make([]*stubInvoker, len(tc.available))
+			invokers := make([]protocolbase.Invoker, len(tc.available))
+			for i, available := range tc.available {
+				u, err := common.NewURL(fmt.Sprintf("dubbo://127.0.0.1:%d/com.test.Availability", 20000+i))
+				require.NoError(t, err)
+				res := &result.RPCResult{Rest: i}
+				res.AddAttachment(constant.AdaptiveServiceRemainingKey, "10")
+				providers[i] = newStubInvoker(u, res)
+				providers[i].SetAvailable(available)
+				invokers[i] = providers[i]
+			}
+			dir := &stubDirectory{url: providers[0].GetURL(), invokers: invokers}
+			if tc.destroyFirst {
+				providers[0].Destroy()
+			}
+			t.Cleanup(func() {
+				for _, provider := range providers {
+					protocolbase.RemoveInvokerUnhealthyStatus(provider)
+				}
+			})
+			ivk := newAdaptiveServiceClusterInvoker(dir)
+
+			// Real P2C initially picks the first provider when neither has metrics.
+			// Repeat to catch repeatedly selecting an unavailable, unmeasured provider.
+			for range 10 {
+				for _, provider := range providers {
+					provider.called = false
+				}
+				res := ivk.Invoke(context.Background(), invocation.NewRPCInvocation("GetInfo", nil, nil))
+				if tc.wantProvider < 0 {
+					require.Error(t, res.Error())
+					assert.Zero(t, recorder.setCalls)
+				} else {
+					require.NoError(t, res.Error())
+					require.Equal(t, tc.wantProvider, res.Result())
+					assert.Same(t, providers[tc.wantProvider].GetURL(), recorder.lastURL)
+				}
+				for i, provider := range providers {
+					assert.Equal(t, i == tc.wantProvider, provider.called, "provider %d", i)
+				}
+			}
+		})
+	}
 }
 
 type dummyCluster struct{}

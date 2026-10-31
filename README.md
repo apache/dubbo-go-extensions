@@ -51,34 +51,6 @@ See the [consumer guide](./cluster/cluster/adaptivesvc/README.md) and
 
 See individual extension directories for detailed documentation.
 
-## Development
-
-Install [pre-commit](https://pre-commit.com/#install) and the import formatter,
-then enable the Git hook in each clone:
-
-```sh
-uv tool install pre-commit
-go install github.com/dubbogo/tools/cmd/imports-formatter@latest
-export PATH="$(go env GOPATH)/bin:$PATH"
-pre-commit install
-```
-
-Go and its `gofmt` command must also be available on `PATH`. If you set `GOBIN`,
-add that directory to `PATH` instead of `$(go env GOPATH)/bin`.
-
-When a commit includes Go files, the hook runs `gofmt -s -w .` followed by
-`imports-formatter` from the repository root, matching CI. Both formatters scan
-the working tree, including untracked Go files. If tracked files are changed,
-the commit stops so you can review and stage the formatting changes before
-committing again. Unstaged changes to tracked files are temporarily stashed by
-pre-commit and restored afterward.
-
-To run the checks manually:
-
-```sh
-pre-commit run --all-files
-```
-
 ## License
 
 Apache License 2.0 - See [LICENSE](./LICENSE) for details.

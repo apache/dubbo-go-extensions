@@ -19,6 +19,7 @@ package adaptivesvc
 
 import (
 	"context"
+	"net/http"
 	"strconv"
 	"strings"
 )
@@ -70,6 +71,14 @@ func (ivk *adaptiveServiceClusterInvoker) Invoke(ctx context.Context, invocation
 		return &result.RPCResult{Err: perrors.New("adaptive service: no available provider")}
 	}
 
+	// Triple exposes unary response trailers through invocation attributes,
+	// rather than RPCResult attachments. Preserve the caller-provided target.
+	var responseTrailer *http.Header
+	callType, _ := invocation.GetAttribute(constant.CallTypeKey)
+	if invoker.GetURL().Protocol == constant.TriProtocol && callType == constant.CallUnary {
+		responseTrailer = prepareResponseTrailer(invocation)
+	}
+
 	// invoke
 	invocation.SetAttachment(constant.AdaptiveServiceEnabledKey, constant.AdaptiveServiceIsEnabled)
 	res := invoker.Invoke(ctx, invocation)
@@ -89,6 +98,9 @@ func (ivk *adaptiveServiceClusterInvoker) Invoke(ctx context.Context, invocation
 		} else if strArr, strArrOK := remainingIface.([]string); strArrOK && len(strArr) > 0 {
 			remainingStr = strArr[0]
 		}
+	}
+	if remainingStr == "" && responseTrailer != nil {
+		remainingStr = responseTrailer.Get(constant.AdaptiveServiceRemainingKey)
 	}
 	if remainingStr == "" {
 		logger.Errorf("[Cluster][AdaptiveSvc] %s field type invalid, key=%s value=%v, expected string",
@@ -110,6 +122,18 @@ func (ivk *adaptiveServiceClusterInvoker) Invoke(ctx context.Context, invocation
 	}
 
 	return res
+}
+
+func prepareResponseTrailer(invocation protocolbase.Invocation) *http.Header {
+	value, _ := invocation.GetAttribute(constant.ResponseTrailerKey)
+	trailer, ok := value.(*http.Header)
+	if !ok || trailer == nil {
+		trailer = new(http.Header)
+		invocation.SetAttribute(constant.ResponseTrailerKey, trailer)
+	}
+	// An early transport failure must not reuse metadata from a previous call.
+	*trailer = nil
+	return trailer
 }
 
 func isAdaptiveServiceFailed(err error) bool {

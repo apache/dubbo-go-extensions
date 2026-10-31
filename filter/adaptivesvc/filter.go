@@ -104,9 +104,10 @@ func (f *adaptiveServiceProviderFilter) Invoke(ctx context.Context, invoker base
 
 func (f *adaptiveServiceProviderFilter) OnResponse(_ context.Context, res result.Result, invoker base.Invoker,
 	invocation base.Invocation) result.Result {
-	var asEnabled string
+	// Admission is decided from the request; Triple responses need not echo it.
+	asEnabled := invocation.GetAttachmentWithDefaultValue(constant.AdaptiveServiceEnabledKey, "")
 	asEnabledIface := res.Attachment(constant.AdaptiveServiceEnabledKey, nil)
-	if asEnabledIface != nil {
+	if asEnabled == "" && asEnabledIface != nil {
 		if str, strOK := asEnabledIface.(string); strOK {
 			asEnabled = str
 		} else if strArr, strArrOK := asEnabledIface.([]string); strArrOK && len(strArr) > 0 {

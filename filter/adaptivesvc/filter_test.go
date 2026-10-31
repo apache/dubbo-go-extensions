@@ -131,6 +131,24 @@ func TestAdaptiveServiceProviderFilter_OnResponse(t *testing.T) {
 	methodName := "GetInfo"
 	filter := newAdaptiveServiceProviderFilter()
 
+	t.Run("EnabledRequestWithoutResponseAttachments", func(t *testing.T) {
+		u, err := common.NewURL("dubbo://127.0.0.1:20000/com.test.ResponseWithoutAttachments")
+		require.NoError(t, err)
+		invoc := invocation.NewRPCInvocation(methodName, nil, map[string]any{
+			constant.AdaptiveServiceEnabledKey: constant.AdaptiveServiceIsEnabled,
+		})
+		res := &result.RPCResult{Rest: "ok"}
+		invoker := mock.NewMockInvoker(ctrl)
+		invoker.EXPECT().GetURL().Return(u).AnyTimes()
+		invoker.EXPECT().Invoke(gomock.Any(), invoc).Return(res)
+		invoked := filter.Invoke(context.Background(), invoker, invoc)
+		ret := filter.OnResponse(context.Background(), invoked, invoker, invoc)
+		require.Same(t, res, ret)
+		require.NoError(t, ret.Error())
+		require.NotEmpty(t, ret.Attachment(constant.AdaptiveServiceRemainingKey, ""))
+		require.Equal(t, "0", ret.Attachment(constant.AdaptiveServiceInflightKey, ""))
+	})
+
 	t.Run("DisabledInResponse", func(t *testing.T) {
 		invoc := invocation.NewRPCInvocation(methodName, nil, nil)
 		res := &result.RPCResult{Rest: "ok"}

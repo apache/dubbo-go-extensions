@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	dubbo.apache.org/dubbo-go/v3 v3.3.3-0.20260916072336-4b2c3f41e9c4
 	github.com/afex/hystrix-go v0.0.0-20180502004556-fa1af6a1f4f5
-	github.com/dubbogo/gost v1.14.5
+	github.com/dubbogo/gost v1.15.0
 	github.com/pkg/errors v0.9.1
 	github.com/stretchr/testify v1.12.1
 	go.uber.org/atomic v1.12.0

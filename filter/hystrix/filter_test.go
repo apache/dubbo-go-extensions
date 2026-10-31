@@ -21,12 +21,15 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 import (
 	"dubbo.apache.org/dubbo-go/v3/common"
+	"dubbo.apache.org/dubbo-go/v3/common/extension"
 	"dubbo.apache.org/dubbo-go/v3/protocol/base"
 	"dubbo.apache.org/dubbo-go/v3/protocol/invocation"
+	"dubbo.apache.org/dubbo-go/v3/protocol/result"
 
 	"github.com/afex/hystrix-go/hystrix"
 
@@ -49,9 +52,8 @@ func TestGetHystrixFilter(t *testing.T) {
 }
 
 func TestHystrixFilter_Invoke(t *testing.T) {
-	// Configure hystrix command for testing
-	// Resource name format: dubbo:consumer:InterfaceName:group:version:Method
-	cmdName := "dubbo:consumer:com.ikurento.user.UserProvider:::TestMethod"
+	resourceName := "com.ikurento.user.UserProvider:::TestMethod"
+	cmdName := internalCommandName(extension.ClientScope, resourceName)
 	hystrix.ConfigureCommand(cmdName, hystrix.CommandConfig{
 		Timeout:                1000,
 		MaxConcurrentRequests:  10,
@@ -71,6 +73,62 @@ func TestHystrixFilter_Invoke(t *testing.T) {
 	result := filter.Invoke(ctx, mockInvoker, mockInvocation)
 	assert.NotNil(t, result)
 	assert.NoError(t, result.Error())
+}
+
+func TestGetResourceName(t *testing.T) {
+	url, err := common.NewURL("dubbo://127.0.0.1:20000/com.ikurento.user.UserProvider")
+	require.NoError(t, err)
+	invoker := base.NewBaseInvoker(url)
+	invocation := invocation.NewRPCInvocation("TestMethod", []any{}, make(map[string]any))
+
+	assert.Equal(t, "com.ikurento.user.UserProvider:::TestMethod", getResourceName(invoker, invocation))
+	assert.Equal(t, "dubbo:consumer:com.ikurento.user.UserProvider:::TestMethod",
+		internalCommandName(extension.ClientScope, getResourceName(invoker, invocation)))
+	assert.Equal(t, "dubbo:provider:com.ikurento.user.UserProvider:::TestMethod",
+		internalCommandName(extension.ServerScope, getResourceName(invoker, invocation)))
+}
+
+func TestHystrixFilterTimeoutAndCircuitFallback(t *testing.T) {
+	const resourceName = "hystrix-timeout-test:::Run"
+	hystrix.ConfigureCommand(internalCommandName(extension.ClientScope, resourceName), hystrix.CommandConfig{
+		Timeout:                10,
+		MaxConcurrentRequests:  10,
+		RequestVolumeThreshold: 1,
+		SleepWindow:            60000,
+		ErrorPercentThreshold:  1,
+	})
+
+	url, err := common.NewURL("dubbo://127.0.0.1:20000/hystrix-timeout-test")
+	require.NoError(t, err)
+	invoker := &delayedInvoker{Invoker: base.NewBaseInvoker(url), delay: 50 * time.Millisecond}
+	hystrixFilter := &Filter{isConsumer: true}
+	invocation := invocation.NewRPCInvocation("Run", []any{}, make(map[string]any))
+
+	first := hystrixFilter.Invoke(context.Background(), invoker, invocation)
+	require.Error(t, first.Error())
+	var firstError *FilterError
+	require.True(t, errors.As(first.Error(), &firstError))
+	assert.True(t, firstError.CircuitOpen())
+
+	second := hystrixFilter.Invoke(context.Background(), invoker, invocation)
+	require.Error(t, second.Error())
+	var secondError *FilterError
+	require.True(t, errors.As(second.Error(), &secondError))
+	assert.True(t, secondError.CircuitOpen())
+
+	// Let the timed-out invocation finish and verify it cannot replace the
+	// fallback result returned by Invoke.
+	time.Sleep(60 * time.Millisecond)
+}
+
+type delayedInvoker struct {
+	base.Invoker
+	delay time.Duration
+}
+
+func (invoker *delayedInvoker) Invoke(context.Context, base.Invocation) result.Result {
+	time.Sleep(invoker.delay)
+	return &result.RPCResult{}
 }
 
 func TestHystrixFilter_OnResponse(t *testing.T) {

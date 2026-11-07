@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 )
 
 import (
@@ -30,11 +31,22 @@ import (
 	hystrixgo "github.com/afex/hystrix-go/hystrix"
 )
 
-const hystrixExtensionName = "hystrix"
+const (
+	hystrixExtensionName = "hystrix"
+	defaultCommandName   = "default"
+)
 
 var (
-	_ extension.Config = (*Config)(nil)
-	_ extension.Option = configOption{}
+	_ extension.Config     = (*Config)(nil)
+	_ extension.Rollbacker = (*Config)(nil)
+	_ extension.Option     = configOption{}
+)
+
+var (
+	hystrixConfigMu         sync.Mutex
+	hystrixRuntimeCommands  = make(map[string]commandRuntimeState)
+	hystrixRuntimeDefaults  = make(map[extension.Scope]runtimeDefaultState)
+	hystrixConfigGeneration uint64
 )
 
 // Config stores a Hystrix configuration for each Dubbo service method.
@@ -42,17 +54,46 @@ var (
 type Config struct {
 	Commands map[string]CommandConfig `yaml:",remain"`
 
-	defaults CommandConfig
+	defaults       CommandConfig
+	rollbackStates map[extension.Scope]configRollbackState
+}
+
+type commandRollbackState struct {
+	previousSettings    hystrixgo.CommandConfig
+	hadPreviousSettings bool
+	previousRuntime     commandRuntimeState
+	hadPreviousRuntime  bool
+	configuredWith      hystrixgo.CommandConfig
+}
+
+type configRollbackState struct {
+	generation         uint64
+	commands           map[string]commandRollbackState
+	previousDefault    runtimeDefaultState
+	hadPreviousDefault bool
+}
+
+type commandRuntimeState struct {
+	generation  uint64
+	fromDefault bool
+	scope       extension.Scope
+}
+
+type runtimeDefaultState struct {
+	command    hystrixgo.CommandConfig
+	enabled    bool
+	generation uint64
 }
 
 // CommandConfig configures one Hystrix command. Zero values use hystrix-go's
 // defaults.
 type CommandConfig struct {
-	Timeout                int `yaml:"timeout"`
-	MaxConcurrentRequests  int `yaml:"max-concurrent-requests"`
-	RequestVolumeThreshold int `yaml:"request-volume-threshold"`
-	SleepWindow            int `yaml:"sleep-window"`
-	ErrorPercentThreshold  int `yaml:"error-percent-threshold"`
+	Timeout                int            `yaml:"timeout"`
+	MaxConcurrentRequests  int            `yaml:"max-concurrent-requests"`
+	RequestVolumeThreshold int            `yaml:"request-volume-threshold"`
+	SleepWindow            int            `yaml:"sleep-window"`
+	ErrorPercentThreshold  int            `yaml:"error-percent-threshold"`
+	UnknownFields          map[string]any `yaml:",remain"`
 }
 
 func (c *Config) Prefix() string {
@@ -61,8 +102,9 @@ func (c *Config) Prefix() string {
 
 func (c *Config) New() extension.Config {
 	return &Config{
-		Commands: make(map[string]CommandConfig),
-		defaults: defaultCommandConfig(),
+		Commands:       make(map[string]CommandConfig),
+		defaults:       defaultCommandConfig(),
+		rollbackStates: make(map[extension.Scope]configRollbackState),
 	}
 }
 
@@ -77,13 +119,37 @@ func (c *Config) Init(scope extension.Scope) error {
 	}
 	sort.Strings(commandNames)
 
+	for _, commandName := range commandNames {
+		if err := validateCommandName(commandName); err != nil {
+			return err
+		}
+		commandConfig := c.Commands[commandName]
+		if len(commandConfig.UnknownFields) > 0 {
+			unknownFields := make([]string, 0, len(commandConfig.UnknownFields))
+			for fieldName := range commandConfig.UnknownFields {
+				unknownFields = append(unknownFields, fieldName)
+			}
+			sort.Strings(unknownFields)
+			return fmt.Errorf("hystrix command %q: unknown field(s): %s",
+				commandName, strings.Join(unknownFields, ", "))
+		}
+	}
+
+	c.defaults = defaultCommandConfig()
+	hasDefault := false
+	if defaultCommand, exists := c.Commands[defaultCommandName]; exists {
+		var err error
+		c.defaults, err = c.defaultedCommand(defaultCommand)
+		if err != nil {
+			return fmt.Errorf("hystrix command %q: %w", defaultCommandName, err)
+		}
+		hasDefault = true
+	}
+
 	configured := make(map[string]CommandConfig, len(commandNames))
 	for _, commandName := range commandNames {
-		if strings.TrimSpace(commandName) == "" {
-			return fmt.Errorf("hystrix command name is required")
-		}
-		if strings.TrimSpace(commandName) != commandName {
-			return fmt.Errorf("hystrix command name %q must not contain surrounding whitespace", commandName)
+		if commandName == defaultCommandName {
+			continue
 		}
 		command, err := c.defaultedCommand(c.Commands[commandName])
 		if err != nil {
@@ -92,23 +158,159 @@ func (c *Config) Init(scope extension.Scope) error {
 		configured[internalCommandName(scope, commandName)] = command
 	}
 
+	hystrixConfigMu.Lock()
+	defer hystrixConfigMu.Unlock()
+	hystrixConfigGeneration++
+	generation := hystrixConfigGeneration
+	rollbackState := configRollbackState{
+		generation: generation,
+		commands:   make(map[string]commandRollbackState, len(configured)),
+	}
+	if previousDefault, exists := hystrixRuntimeDefaults[scope]; exists {
+		rollbackState.previousDefault = previousDefault
+		rollbackState.hadPreviousDefault = true
+	}
+	hystrixRuntimeDefaults[scope] = runtimeDefaultState{
+		command:    toHystrixCommandConfig(c.defaults),
+		enabled:    hasDefault,
+		generation: generation,
+	}
+	existingSettings := hystrixgo.GetCircuitSettings()
 	for _, commandName := range commandNames {
+		if commandName == defaultCommandName {
+			continue
+		}
 		internalName := internalCommandName(scope, commandName)
 		command := configured[internalName]
-		hystrixgo.ConfigureCommand(internalName, hystrixgo.CommandConfig{
-			Timeout:                command.Timeout,
-			MaxConcurrentRequests:  command.MaxConcurrentRequests,
-			RequestVolumeThreshold: command.RequestVolumeThreshold,
-			SleepWindow:            command.SleepWindow,
-			ErrorPercentThreshold:  command.ErrorPercentThreshold,
-		})
+		hystrixCommand := toHystrixCommandConfig(command)
+		state := commandRollbackState{configuredWith: hystrixCommand}
+		if previous, exists := existingSettings[internalName]; exists {
+			state.previousSettings = commandConfigFromSettings(previous)
+			state.hadPreviousSettings = true
+		}
+		if previous, exists := hystrixRuntimeCommands[internalName]; exists {
+			state.previousRuntime = previous
+			state.hadPreviousRuntime = true
+		}
+		rollbackState.commands[internalName] = state
+		hystrixRuntimeCommands[internalName] = commandRuntimeState{generation: generation, scope: scope}
+		hystrixgo.ConfigureCommand(internalName, hystrixCommand)
 	}
+	if c.rollbackStates == nil {
+		c.rollbackStates = make(map[extension.Scope]configRollbackState)
+	}
+	c.rollbackStates[scope] = rollbackState
 	return nil
+}
+
+// Rollback restores settings written by Init when a later extension fails
+// during the same initialization attempt. Hystrix keeps settings process-wide,
+// so clients or servers using the same command name also share its settings.
+func (c *Config) Rollback(scope extension.Scope) error {
+	hystrixConfigMu.Lock()
+	defer hystrixConfigMu.Unlock()
+
+	rollbackState, exists := c.rollbackStates[scope]
+	if !exists {
+		return nil
+	}
+	for commandName, state := range rollbackState.commands {
+		currentRuntime, exists := hystrixRuntimeCommands[commandName]
+		if !exists || currentRuntime.generation != rollbackState.generation {
+			continue
+		}
+		current, exists := hystrixgo.GetCircuitSettings()[commandName]
+		if !exists || !sameCommandConfig(commandConfigFromSettings(current), state.configuredWith) {
+			continue
+		}
+		if state.hadPreviousSettings {
+			hystrixgo.ConfigureCommand(commandName, state.previousSettings)
+		} else {
+			// hystrix-go has no per-command delete API; default settings have
+			// the same behavior as an absent settings entry on the next call.
+			hystrixgo.ConfigureCommand(commandName, hystrixgo.CommandConfig{})
+		}
+		if state.hadPreviousRuntime {
+			hystrixRuntimeCommands[commandName] = state.previousRuntime
+		} else {
+			delete(hystrixRuntimeCommands, commandName)
+		}
+	}
+	if currentDefault, exists := hystrixRuntimeDefaults[scope]; exists && currentDefault.generation == rollbackState.generation {
+		if rollbackState.hadPreviousDefault {
+			hystrixRuntimeDefaults[scope] = rollbackState.previousDefault
+		} else {
+			delete(hystrixRuntimeDefaults, scope)
+		}
+	}
+	for commandName, commandState := range hystrixRuntimeCommands {
+		if commandState.scope == scope && commandState.fromDefault && commandState.generation == rollbackState.generation {
+			delete(hystrixRuntimeCommands, commandName)
+		}
+	}
+	delete(c.rollbackStates, scope)
+	return nil
+}
+
+func commandConfigFromSettings(settings *hystrixgo.Settings) hystrixgo.CommandConfig {
+	return hystrixgo.CommandConfig{
+		Timeout:                int(settings.Timeout.Milliseconds()),
+		MaxConcurrentRequests:  settings.MaxConcurrentRequests,
+		RequestVolumeThreshold: int(settings.RequestVolumeThreshold),
+		SleepWindow:            int(settings.SleepWindow.Milliseconds()),
+		ErrorPercentThreshold:  settings.ErrorPercentThreshold,
+	}
+}
+
+func sameCommandConfig(left, right hystrixgo.CommandConfig) bool {
+	return left.Timeout == right.Timeout &&
+		left.MaxConcurrentRequests == right.MaxConcurrentRequests &&
+		left.RequestVolumeThreshold == right.RequestVolumeThreshold &&
+		left.SleepWindow == right.SleepWindow &&
+		left.ErrorPercentThreshold == right.ErrorPercentThreshold
+}
+
+func toHystrixCommandConfig(command CommandConfig) hystrixgo.CommandConfig {
+	return hystrixgo.CommandConfig{
+		Timeout:                command.Timeout,
+		MaxConcurrentRequests:  command.MaxConcurrentRequests,
+		RequestVolumeThreshold: command.RequestVolumeThreshold,
+		SleepWindow:            command.SleepWindow,
+		ErrorPercentThreshold:  command.ErrorPercentThreshold,
+	}
+}
+
+func ensureRuntimeCommand(scope extension.Scope, commandName string) bool {
+	hystrixConfigMu.Lock()
+	defer hystrixConfigMu.Unlock()
+
+	registration, exists := hystrixRuntimeCommands[commandName]
+	if exists && !registration.fromDefault {
+		return true
+	}
+	defaults, hasDefault := hystrixRuntimeDefaults[scope]
+	if !hasDefault || !defaults.enabled {
+		if exists {
+			delete(hystrixRuntimeCommands, commandName)
+		}
+		return false
+	}
+	if exists && registration.fromDefault && registration.generation == defaults.generation {
+		return true
+	}
+	hystrixgo.ConfigureCommand(commandName, defaults.command)
+	hystrixRuntimeCommands[commandName] = commandRuntimeState{
+		generation:  defaults.generation,
+		fromDefault: true,
+		scope:       scope,
+	}
+	return true
 }
 
 func (c *Config) FilterNames(scope extension.Scope) []string {
 	filterName, err := filterNameForScope(scope)
 	if err != nil {
+		// The core asks for filter names before Init; Init reports unsupported scopes.
 		return nil
 	}
 	return []string{filterName}
@@ -135,9 +337,34 @@ func defaultCommandConfig() CommandConfig {
 	}
 }
 
+func validateCommandName(commandName string) error {
+	if strings.TrimSpace(commandName) == "" {
+		return fmt.Errorf("hystrix command name is required")
+	}
+	if strings.TrimSpace(commandName) != commandName {
+		return fmt.Errorf("hystrix command name %q must not contain surrounding whitespace", commandName)
+	}
+	if commandName == defaultCommandName {
+		return nil
+	}
+	if strings.Count(commandName, ":") != 3 {
+		return fmt.Errorf("hystrix command %q must use interface:group:version:method format", commandName)
+	}
+	return nil
+}
+
+func isZeroCommandConfig(command CommandConfig) bool {
+	return command.Timeout == 0 &&
+		command.MaxConcurrentRequests == 0 &&
+		command.RequestVolumeThreshold == 0 &&
+		command.SleepWindow == 0 &&
+		command.ErrorPercentThreshold == 0 &&
+		len(command.UnknownFields) == 0
+}
+
 func (c *Config) defaultedCommand(command CommandConfig) (CommandConfig, error) {
 	defaults := c.defaults
-	if defaults == (CommandConfig{}) {
+	if isZeroCommandConfig(defaults) {
 		defaults = defaultCommandConfig()
 	}
 	fields := []*int{
@@ -265,21 +492,15 @@ func (option configOption) Apply(config extension.Config) error {
 		apply(&options)
 	}
 	if strings.TrimSpace(options.name) == "" {
-		if len(option.options) == 0 {
-			return nil
-		}
 		return fmt.Errorf("hystrix command name is required")
 	}
-	if strings.TrimSpace(options.name) != options.name {
-		return fmt.Errorf("hystrix command name %q must not contain surrounding whitespace", options.name)
+	if err := validateCommandName(options.name); err != nil {
+		return err
 	}
 
 	command, exists := hystrixConfig.Commands[options.name]
 	if !exists {
-		command = hystrixConfig.defaults
-		if command == (CommandConfig{}) {
-			command = defaultCommandConfig()
-		}
+		command = CommandConfig{}
 	}
 	if options.fields&timeoutField != 0 {
 		command.Timeout = options.values.Timeout

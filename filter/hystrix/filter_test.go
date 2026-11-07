@@ -53,13 +53,18 @@ func TestGetHystrixFilter(t *testing.T) {
 
 func TestHystrixFilter_Invoke(t *testing.T) {
 	resourceName := "com.ikurento.user.UserProvider:::TestMethod"
-	cmdName := internalCommandName(extension.ClientScope, resourceName)
-	hystrix.ConfigureCommand(cmdName, hystrix.CommandConfig{
+	config := (&Config{}).New().(*Config)
+	config.Commands[resourceName] = CommandConfig{
 		Timeout:                1000,
 		MaxConcurrentRequests:  10,
 		RequestVolumeThreshold: 5,
 		SleepWindow:            1000,
 		ErrorPercentThreshold:  50,
+	}
+	require.NoError(t, config.Init(extension.ClientScope))
+	t.Cleanup(func() {
+		assert.NoError(t, config.Rollback(extension.ClientScope))
+		hystrix.Flush()
 	})
 
 	url, err := common.NewURL("dubbo://127.0.0.1:20000/com.ikurento.user.UserProvider")
@@ -90,17 +95,23 @@ func TestGetResourceName(t *testing.T) {
 
 func TestHystrixFilterTimeoutAndCircuitFallback(t *testing.T) {
 	const resourceName = "hystrix-timeout-test:::Run"
-	hystrix.ConfigureCommand(internalCommandName(extension.ClientScope, resourceName), hystrix.CommandConfig{
-		Timeout:                10,
+	config := (&Config{}).New().(*Config)
+	config.Commands[resourceName] = CommandConfig{
+		Timeout:                100,
 		MaxConcurrentRequests:  10,
 		RequestVolumeThreshold: 1,
 		SleepWindow:            60000,
 		ErrorPercentThreshold:  1,
+	}
+	require.NoError(t, config.Init(extension.ClientScope))
+	t.Cleanup(func() {
+		assert.NoError(t, config.Rollback(extension.ClientScope))
+		hystrix.Flush()
 	})
 
 	url, err := common.NewURL("dubbo://127.0.0.1:20000/hystrix-timeout-test")
 	require.NoError(t, err)
-	invoker := &delayedInvoker{Invoker: base.NewBaseInvoker(url), delay: 50 * time.Millisecond}
+	invoker := &delayedInvoker{Invoker: base.NewBaseInvoker(url), delay: 300 * time.Millisecond}
 	hystrixFilter := &Filter{isConsumer: true}
 	invocation := invocation.NewRPCInvocation("Run", []any{}, make(map[string]any))
 
@@ -108,17 +119,74 @@ func TestHystrixFilterTimeoutAndCircuitFallback(t *testing.T) {
 	require.Error(t, first.Error())
 	var firstError *FilterError
 	require.True(t, errors.As(first.Error(), &firstError))
-	assert.True(t, firstError.CircuitOpen())
+	assert.False(t, firstError.CircuitOpen())
+	assert.ErrorIs(t, first.Error(), hystrix.ErrTimeout)
 
 	second := hystrixFilter.Invoke(context.Background(), invoker, invocation)
 	require.Error(t, second.Error())
 	var secondError *FilterError
 	require.True(t, errors.As(second.Error(), &secondError))
 	assert.True(t, secondError.CircuitOpen())
+	assert.ErrorIs(t, second.Error(), hystrix.ErrCircuitOpen)
+}
 
-	// Let the timed-out invocation finish and verify it cannot replace the
-	// fallback result returned by Invoke.
-	time.Sleep(60 * time.Millisecond)
+func TestHystrixFilterContextCancellation(t *testing.T) {
+	const resourceName = "hystrix-cancel-test:::Run"
+	config := (&Config{}).New().(*Config)
+	config.Commands[resourceName] = CommandConfig{
+		Timeout:                1000,
+		MaxConcurrentRequests:  10,
+		RequestVolumeThreshold: 5,
+		SleepWindow:            1000,
+		ErrorPercentThreshold:  50,
+	}
+	require.NoError(t, config.Init(extension.ClientScope))
+	t.Cleanup(func() {
+		assert.NoError(t, config.Rollback(extension.ClientScope))
+		hystrix.Flush()
+	})
+
+	url, err := common.NewURL("dubbo://127.0.0.1:20000/hystrix-cancel-test")
+	require.NoError(t, err)
+	invoker := &contextAwareInvoker{Invoker: base.NewBaseInvoker(url), started: make(chan struct{})}
+	hystrixFilter := &Filter{isConsumer: true}
+	invocation := invocation.NewRPCInvocation("Run", []any{}, make(map[string]any))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	resultCh := make(chan result.Result, 1)
+	go func() {
+		resultCh <- hystrixFilter.Invoke(ctx, invoker, invocation)
+	}()
+	<-invoker.started
+	cancel()
+
+	select {
+	case invokeResult := <-resultCh:
+		require.Error(t, invokeResult.Error())
+		assert.ErrorIs(t, invokeResult.Error(), context.Canceled)
+		var filterError *FilterError
+		require.True(t, errors.As(invokeResult.Error(), &filterError))
+		assert.False(t, filterError.CircuitOpen())
+	case <-time.After(time.Second):
+		t.Fatal("Invoke did not return after context cancellation")
+	}
+}
+
+func TestHystrixFilterPassesThroughUnconfiguredMethod(t *testing.T) {
+	const resourceName = "hystrix-unconfigured-test:::Run"
+	url, err := common.NewURL("dubbo://127.0.0.1:20000/hystrix-unconfigured-test")
+	require.NoError(t, err)
+	invoker := base.NewBaseInvoker(url)
+	hystrixFilter := &Filter{isConsumer: true}
+	invocation := invocation.NewRPCInvocation("Run", []any{}, make(map[string]any))
+	commandName := internalCommandName(extension.ClientScope, resourceName)
+
+	result := hystrixFilter.Invoke(context.Background(), invoker, invocation)
+	require.NotNil(t, result)
+	assert.NoError(t, result.Error())
+	_, configured := hystrix.GetCircuitSettings()[commandName]
+	assert.False(t, configured)
 }
 
 type delayedInvoker struct {
@@ -129,6 +197,19 @@ type delayedInvoker struct {
 func (invoker *delayedInvoker) Invoke(context.Context, base.Invocation) result.Result {
 	time.Sleep(invoker.delay)
 	return &result.RPCResult{}
+}
+
+type contextAwareInvoker struct {
+	base.Invoker
+	started chan struct{}
+}
+
+func (invoker *contextAwareInvoker) Invoke(ctx context.Context, _ base.Invocation) result.Result {
+	close(invoker.started)
+	<-ctx.Done()
+	invokeResult := &result.RPCResult{}
+	invokeResult.SetError(ctx.Err())
+	return invokeResult
 }
 
 func TestHystrixFilter_OnResponse(t *testing.T) {

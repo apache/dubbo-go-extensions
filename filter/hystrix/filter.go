@@ -23,6 +23,7 @@ package hystrix
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -45,6 +46,15 @@ const (
 	// Internal Hystrix command namespaces, not part of the extension config API.
 	internalProviderCommandPrefix = "dubbo:provider:"
 	internalConsumerCommandPrefix = "dubbo:consumer:"
+
+	// Deprecated: use constant.HystrixConsumerFilterKey.
+	HystrixConsumerFilterKey = constant.HystrixConsumerFilterKey
+	// Deprecated: use constant.HystrixProviderFilterKey.
+	HystrixProviderFilterKey = constant.HystrixProviderFilterKey
+	// Deprecated: use the internal provider namespace managed by this package.
+	DefaultProviderPrefix = internalProviderCommandPrefix
+	// Deprecated: use the internal consumer namespace managed by this package.
+	DefaultConsumerPrefix = internalConsumerCommandPrefix
 )
 
 func init() {
@@ -53,7 +63,8 @@ func init() {
 	extension.SetFilter(constant.HystrixProviderFilterKey, newFilterProvider)
 }
 
-// FilterError implements error interface
+// FilterError wraps an error returned by Hystrix and reports whether the
+// circuit was open for the request.
 type FilterError struct {
 	err         error
 	circuitOpen bool
@@ -63,12 +74,18 @@ func (hfError *FilterError) Error() string {
 	return hfError.err.Error()
 }
 
-// CircuitOpen returns whether the circuit is open
+// Unwrap returns the underlying Hystrix or invocation error.
+func (hfError *FilterError) Unwrap() error {
+	return hfError.err
+}
+
+// CircuitOpen reports whether the request failed because the circuit was
+// open. It is false for timeouts, concurrency rejections, and cancellations.
 func (hfError *FilterError) CircuitOpen() bool {
 	return hfError.circuitOpen
 }
 
-// NewHystrixFilterError return a FilterError instance
+// NewHystrixFilterError returns a FilterError instance.
 func NewHystrixFilterError(err error, circuitOpen bool) error {
 	return &FilterError{
 		err:         err,
@@ -89,23 +106,29 @@ func (f *Filter) Invoke(ctx context.Context, invoker base.Invoker, invocation ba
 		scope = extension.ClientScope
 	}
 	cmdName := internalCommandName(scope, resourceName)
+	if !ensureRuntimeCommand(scope, cmdName) {
+		return invoker.Invoke(ctx, invocation)
+	}
 
 	var (
 		res          result.Result
 		resMu        sync.Mutex
 		fallbackUsed bool
 	)
-	err := hystrix.Do(cmdName, func() error {
+	err := hystrix.DoC(ctx, cmdName, func(ctx context.Context) error {
 		invokeResult := invoker.Invoke(ctx, invocation)
+		if invokeResult == nil {
+			return errors.New("hystrix invoker returned a nil result")
+		}
 		resMu.Lock()
 		if !fallbackUsed {
 			res = invokeResult
 		}
 		resMu.Unlock()
 		return invokeResult.Error()
-	}, func(err error) error {
+	}, func(_ context.Context, err error) error {
 		// Return fallback error
-		_, isCircuitOpen := err.(hystrix.CircuitError)
+		isCircuitOpen := errors.Is(err, hystrix.ErrCircuitOpen)
 		if isCircuitOpen {
 			logger.Debugf("[Hystrix Filter] Circuit opened for %s", cmdName)
 		} else {
@@ -121,10 +144,14 @@ func (f *Filter) Invoke(ctx context.Context, invoker base.Invoker, invocation ba
 	})
 
 	resMu.Lock()
-	defer resMu.Unlock()
-	if err != nil {
-		return res
+	if res == nil {
+		if err == nil {
+			err = errors.New("hystrix returned no result")
+		}
+		res = &result.RPCResult{}
+		res.SetError(NewHystrixFilterError(err, errors.Is(err, hystrix.ErrCircuitOpen)))
 	}
+	resMu.Unlock()
 	return res
 }
 

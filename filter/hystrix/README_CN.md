@@ -2,7 +2,7 @@
 
 [English](./README.md) | 简体中文
 
-Hystrix 过滤器为 dubbo-go consumer 和 provider 提供熔断能力。通过 dubbo-go extension API 配置后，扩展会自动把对应的 filter 加入 client 或 server 的 filter chain。
+Hystrix 过滤器为 dubbo-go consumer 和 provider 提供熔断能力。通过 dubbo-go extension API 配置后，扩展会自动把对应的 filter 加入 client 或 server 的 filter chain。未单独配置 command 的方法会直接调用；只有该 scope 配置了 `default` command 时，这些方法才会使用默认熔断策略。
 
 ## 安装
 
@@ -13,7 +13,12 @@ go get github.com/apache/dubbo-go-extensions/filter/hystrix
 ## Consumer 配置
 
 ```go
-cli, err := ins.NewClient(
+import (
+	"dubbo.apache.org/dubbo-go/v3/client"
+	"github.com/apache/dubbo-go-extensions/filter/hystrix"
+)
+
+cli, err := client.NewClient(
 	client.WithExtension(
 		hystrix.WithConfig(
 			hystrix.WithCommandName("greet.GreetService:::Greet"),
@@ -32,6 +37,11 @@ cli, err := ins.NewClient(
 ## Provider 配置
 
 ```go
+import (
+	"dubbo.apache.org/dubbo-go/v3/server"
+	"github.com/apache/dubbo-go-extensions/filter/hystrix"
+)
+
 srv, err := server.NewServer(
 	server.WithExtension(
 		hystrix.WithConfig(
@@ -80,7 +90,22 @@ dubbo:
 
 command key 格式为 `接口:分组:版本:方法`。例如 `greet.GreetService:::Greet` 的分组和版本为空。key 中的点号和冒号需要保留；不需要增加 `commands` 层，也不需要添加 `dubbo:consumer:` 或 `dubbo:provider:` 前缀。
 
+保留键 `default` 可以为没有单独 command 配置的方法设置默认策略；具体方法的配置优先级更高：
+
+```yaml
+consumer:
+  default:
+    timeout: 3000
+    max-concurrent-requests: 200
+  "greet.GreetService:::Greet":
+    timeout: 500
+```
+
+typed API 也可以通过 `WithConfig(WithCommandName("default"), ...)` 配置默认策略。
+
 配置优先级为默认值、YAML、typed options。consumer YAML 只在 client 初始化时生效，provider YAML 只在 server 初始化时生效。Hystrix 不支持 instance scope。
+
+Hystrix 在进程级保存 command 配置和熔断状态。同一 scope 下使用相同 command name 的多个 client 或 server 会共享熔断器；后初始化的配置会设置 command 参数和默认策略。后续初始化未配置 `default` 时，未单独配置的方法会直接调用。
 
 ## Command 参数
 
@@ -92,4 +117,4 @@ command key 格式为 `接口:分组:版本:方法`。例如 `greet.GreetService
 | `sleep-window` | 熔断打开后尝试恢复前的等待时间，单位毫秒 | 5000 |
 | `error-percent-threshold` | 触发熔断的错误百分比 | 50 |
 
-每次 `WithConfig` 配置一个 command。配置多个 command 时调用多次；同一个 command 的 typed options 按声明顺序覆盖之前的选项和 YAML 值。
+每次 `WithConfig` 配置一个 command 或保留的 `default` 项。配置多个条目时调用多次；同一个条目的 typed options 按声明顺序覆盖之前的选项和 YAML 值。

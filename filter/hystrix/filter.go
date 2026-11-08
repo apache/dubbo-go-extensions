@@ -155,6 +155,43 @@ func (f *Filter) Invoke(ctx context.Context, invoker base.Invoker, invocation ba
 	return res
 }
 
+// warnUnconfiguredLegacyCommands reports old hystrix-go settings that the
+// extension config did not declare. The caller holds hystrixConfigMu.
+func warnUnconfiguredLegacyCommands(
+	scope extension.Scope,
+	settings map[string]*hystrix.Settings,
+	configured map[string]CommandConfig,
+) {
+	prefix := internalConsumerCommandPrefix
+	if scope == extension.ServerScope {
+		prefix = internalProviderCommandPrefix
+	}
+	for commandName := range settings {
+		if !strings.HasPrefix(commandName, prefix) {
+			continue
+		}
+		if _, configuredByExtension := configured[commandName]; configuredByExtension {
+			continue
+		}
+		if _, registered := hystrixRuntimeCommands[commandName]; registered {
+			continue
+		}
+		warnLegacyCommandOnce(commandName)
+	}
+}
+
+func warnLegacyCommandOnce(commandName string) {
+	warning, _ := hystrixLegacyWarnings.LoadOrStore(commandName, &sync.Once{})
+	warning.(*sync.Once).Do(func() {
+		if _, exists := hystrix.GetCircuitSettings()[commandName]; exists {
+			logger.Warnf(
+				"[Hystrix Filter] existing command %q is not declared through extension config and will be bypassed; migrate it to hystrix.WithConfig or YAML",
+				commandName,
+			)
+		}
+	})
+}
+
 // OnResponse dummy process, returns the result directly
 func (f *Filter) OnResponse(ctx context.Context, result result.Result, invoker base.Invoker, invocation base.Invocation) result.Result {
 	return result

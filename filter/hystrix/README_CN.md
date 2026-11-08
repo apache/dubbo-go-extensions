@@ -4,6 +4,10 @@
 
 Hystrix 过滤器为 dubbo-go consumer 和 provider 提供熔断能力。通过 dubbo-go extension API 配置后，扩展会自动把对应的 filter 加入 client 或 server 的 filter chain。未单独配置 command 的方法会直接调用；只有该 scope 配置了 `default` command 时，这些方法才会使用默认熔断策略。
 
+## 破坏性变更
+
+现在只有通过本扩展的 Go API 或 YAML 声明的 command 才会经过 Hystrix filter。仅调用 `hystrix.ConfigureCommand` 不再启用本 filter 中的 command；过去隐式使用 hystrix-go 默认值的方法现在会直接调用，除非配置了 `default`。请将这类 command 迁移到 `hystrix.WithConfig(...)` 或 `dubbo.extensions.hystrix` YAML 配置。
+
 ## 安装
 
 ```bash

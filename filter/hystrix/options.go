@@ -43,9 +43,10 @@ var (
 )
 
 var (
-	hystrixConfigMu         sync.Mutex
+	hystrixConfigMu         sync.RWMutex
 	hystrixRuntimeCommands  = make(map[string]commandRuntimeState)
 	hystrixRuntimeDefaults  = make(map[extension.Scope]runtimeDefaultState)
+	hystrixLegacyWarnings   sync.Map
 	hystrixConfigGeneration uint64
 )
 
@@ -176,6 +177,7 @@ func (c *Config) Init(scope extension.Scope) error {
 		generation: generation,
 	}
 	existingSettings := hystrixgo.GetCircuitSettings()
+	warnUnconfiguredLegacyCommands(scope, existingSettings, configured)
 	for _, commandName := range commandNames {
 		if commandName == defaultCommandName {
 			continue
@@ -226,8 +228,9 @@ func (c *Config) Rollback(scope extension.Scope) error {
 		if state.hadPreviousSettings {
 			hystrixgo.ConfigureCommand(commandName, state.previousSettings)
 		} else {
-			// hystrix-go has no per-command delete API; default settings have
-			// the same behavior as an absent settings entry on the next call.
+			// hystrix-go has no per-command delete API. ConfigureCommand fills
+			// every zero field from its Default* constants (settings.go), so an
+			// empty config resets this command to the library defaults.
 			hystrixgo.ConfigureCommand(commandName, hystrixgo.CommandConfig{})
 		}
 		if state.hadPreviousRuntime {
@@ -281,14 +284,33 @@ func toHystrixCommandConfig(command CommandConfig) hystrixgo.CommandConfig {
 }
 
 func ensureRuntimeCommand(scope extension.Scope, commandName string) bool {
-	hystrixConfigMu.Lock()
-	defer hystrixConfigMu.Unlock()
-
+	hystrixConfigMu.RLock()
 	registration, exists := hystrixRuntimeCommands[commandName]
 	if exists && !registration.fromDefault {
+		hystrixConfigMu.RUnlock()
 		return true
 	}
 	defaults, hasDefault := hystrixRuntimeDefaults[scope]
+	if !hasDefault || !defaults.enabled {
+		hystrixConfigMu.RUnlock()
+		warnLegacyCommandOnce(commandName)
+		return false
+	}
+	if exists && registration.fromDefault && registration.generation == defaults.generation {
+		hystrixConfigMu.RUnlock()
+		return true
+	}
+	hystrixConfigMu.RUnlock()
+
+	// Only the first invocation of an unconfigured method takes the write lock
+	// to install the scope's default command settings.
+	hystrixConfigMu.Lock()
+	defer hystrixConfigMu.Unlock()
+	registration, exists = hystrixRuntimeCommands[commandName]
+	if exists && !registration.fromDefault {
+		return true
+	}
+	defaults, hasDefault = hystrixRuntimeDefaults[scope]
 	if !hasDefault || !defaults.enabled {
 		if exists {
 			delete(hystrixRuntimeCommands, commandName)

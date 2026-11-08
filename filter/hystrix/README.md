@@ -4,6 +4,10 @@ English | [简体中文](./README_CN.md)
 
 The Hystrix filter adds circuit breaking to dubbo-go consumers and providers. Configure it with the dubbo-go extension API; the extension adds the matching filter to the client or server filter chain automatically. Methods without an explicit command configuration pass through unless the scope has a `default` command configuration.
 
+## Breaking change
+
+The filter now applies only to commands declared through this extension's Go or YAML configuration. Existing `hystrix.ConfigureCommand` calls alone no longer enable a command in this filter, and methods that previously received hystrix-go's implicit defaults now pass through unless `default` is configured. Migrate those commands to `hystrix.WithConfig(...)` or the `dubbo.extensions.hystrix` YAML configuration.
+
 ## Installation
 
 ```bash

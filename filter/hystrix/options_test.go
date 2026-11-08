@@ -32,6 +32,7 @@ import (
 	"dubbo.apache.org/dubbo-go/v3/server"
 
 	hystrixgo "github.com/afex/hystrix-go/hystrix"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -124,13 +125,35 @@ func TestConfigRollbackRestoresPreviousSettings(t *testing.T) {
 	config := (&Config{}).New().(*Config)
 	config.Commands[resourceName] = CommandConfig{Timeout: 250}
 	require.NoError(t, config.Init(extension.ClientScope))
-	assert.Equal(t, 250, int(hystrixgo.GetCircuitSettings()[internalName].Timeout.Milliseconds()))
+	updatedSettings, ok := hystrixgo.GetCircuitSettings()[internalName]
+	require.True(t, ok)
+	assert.Equal(t, 250, int(updatedSettings.Timeout.Milliseconds()))
 
 	require.NoError(t, config.Rollback(extension.ClientScope))
 	settings := hystrixgo.GetCircuitSettings()[internalName]
 	require.NotNil(t, settings)
 	assert.Equal(t, 125, int(settings.Timeout.Milliseconds()))
 	assert.Equal(t, 11, settings.MaxConcurrentRequests)
+}
+
+func TestConfigRollbackRestoresPreviousInitGeneration(t *testing.T) {
+	isolateRuntimeConfiguration(t)
+
+	const resourceName = "hystrix-rollback-generation-test:::Run"
+	internalName := internalCommandName(extension.ClientScope, resourceName)
+	config := (&Config{}).New().(*Config)
+	config.Commands[resourceName] = CommandConfig{Timeout: 125}
+	require.NoError(t, config.Init(extension.ClientScope))
+
+	config.Commands[resourceName] = CommandConfig{Timeout: 250}
+	require.NoError(t, config.Init(extension.ClientScope))
+	assert.Equal(t, 250, int(hystrixgo.GetCircuitSettings()[internalName].Timeout.Milliseconds()))
+
+	require.NoError(t, config.Rollback(extension.ClientScope))
+	settings := hystrixgo.GetCircuitSettings()[internalName]
+	require.NotNil(t, settings)
+	assert.Equal(t, 125, int(settings.Timeout.Milliseconds()))
+	assert.True(t, ensureRuntimeCommand(extension.ClientScope, internalName))
 }
 
 func TestInitializeYAMLAndTypedOptions(t *testing.T) {

@@ -2,7 +2,11 @@
 
 [English](./README.md) | 简体中文
 
-基于 [hystrix-go](https://github.com/afex/hystrix-go) 的 dubbo-go 熔断器过滤器。
+Hystrix 过滤器为 dubbo-go consumer 和 provider 提供熔断能力。通过 dubbo-go extension API 配置后，扩展会自动把对应的 filter 加入 client 或 server 的 filter chain。未单独配置 command 的方法会直接调用；只有该 scope 配置了 `default` command 时，这些方法才会使用默认熔断策略。
+
+## 破坏性变更
+
+现在只有通过本扩展的 Go API 或 YAML 声明的 command 才会经过 Hystrix filter。仅调用 `hystrix.ConfigureCommand` 不再启用本 filter 中的 command；过去隐式使用 hystrix-go 默认值的方法现在会直接调用，除非配置了 `default`。配置 `default` 后，未声明的 method 会使用 extension default；该 command name 原先通过 `hystrix.ConfigureCommand` 设置的参数会在首次调用时被替换。请将这类 command 迁移到 `hystrix.WithConfig(...)` 或 `dubbo.extensions.hystrix` YAML 配置。
 
 ## 安装
 
@@ -10,83 +14,113 @@
 go get github.com/apache/dubbo-go-extensions/filter/hystrix
 ```
 
-## 使用方法
-
-### 消费者端 (Consumer Side)
+## Consumer 配置
 
 ```go
 import (
-    "context"
-    "github.com/afex/hystrix-go/hystrix"
-    _ "github.com/apache/dubbo-go-extensions/filter/hystrix"
-    "dubbo.apache.org/dubbo-go/v3"
-    "dubbo.apache.org/dubbo-go/v3/client"
-    "dubbo.apache.org/dubbo-go/v3/registry"
+	"dubbo.apache.org/dubbo-go/v3/client"
+	"github.com/apache/dubbo-go-extensions/filter/hystrix"
 )
 
-func init() {
-    // 为服务方法配置 hystrix 命令
-    // 资源名称格式: dubbo:consumer:接口名:group:version:方法名
-    cmdName := "dubbo:consumer:greet.GreetService:::Greet"
-
-    hystrix.ConfigureCommand(cmdName, hystrix.CommandConfig{
-        Timeout:                1000,
-        MaxConcurrentRequests:  10,
-        RequestVolumeThreshold: 5,
-        SleepWindow:            5000,
-        ErrorPercentThreshold:  50,
-    })
-}
-
-func main() {
-    ins, _ := dubbo.NewInstance(
-        dubbo.WithRegistry(
-            registry.WithZookeeper(),
-            registry.WithAddress("127.0.0.1:2181"),
-        ),
-    )
-    cli, _ := ins.NewClient()
-    svc, _ := greet.NewGreetService(cli, client.WithFilter("hystrix_consumer"))
-
-    resp, err := svc.Greet(context.Background(), &greet.GreetRequest{Name: "test"})
-}
+cli, err := client.NewClient(
+	client.WithExtension(
+		hystrix.WithConfig(
+			hystrix.WithCommandName("greet.GreetService:::Greet"),
+			hystrix.WithTimeout(1000),
+			hystrix.WithMaxConcurrentRequests(10),
+			hystrix.WithRequestVolumeThreshold(5),
+			hystrix.WithSleepWindow(5000),
+			hystrix.WithErrorPercentThreshold(50),
+		),
+	),
+)
 ```
 
-### 提供者端 (Provider Side)
+导入 `github.com/apache/dubbo-go-extensions/filter/hystrix` 并使用其配置选项即可。扩展会自动配置 Hystrix command，并添加 consumer filter。
+
+## Provider 配置
 
 ```go
 import (
-    _ "github.com/apache/dubbo-go-extensions/filter/hystrix"
-    "dubbo.apache.org/dubbo-go/v3/server"
+	"dubbo.apache.org/dubbo-go/v3/server"
+	"github.com/apache/dubbo-go-extensions/filter/hystrix"
 )
 
-func main() {
-    srv, _ := server.NewServer(
-        server.WithFilter("hystrix_provider"),
-    )
-    // ... 服务器其余配置
-}
+srv, err := server.NewServer(
+	server.WithExtension(
+		hystrix.WithConfig(
+			hystrix.WithCommandName("greet.GreetService:::Greet"),
+			hystrix.WithTimeout(1000),
+			hystrix.WithMaxConcurrentRequests(10),
+			hystrix.WithRequestVolumeThreshold(5),
+			hystrix.WithSleepWindow(5000),
+			hystrix.WithErrorPercentThreshold(50),
+		),
+	),
+)
 ```
 
-## 过滤器名称
+server 会自动将 provider filter 加入 filter chain。
 
-- **消费者端**: `"hystrix_consumer"`
-- **提供者端**: `"hystrix_provider"`
+## YAML 配置
 
-## 资源命名规则
+使用 `dubbo.Load()` 时，需要以副作用方式导入 Hystrix 扩展包来注册配置：
 
-Hystrix 命令命名格式如下：
-```
-dubbo:{consumer|provider}:{interface}:{group}:{version}:{method}
+```go
+import _ "github.com/apache/dubbo-go-extensions/filter/hystrix"
 ```
 
-- `{consumer|provider}`: 消费者端或提供者端
-- `{interface}`: 完整接口名（例如 `greet.GreetService`）
-- `{group}`: 服务分组（未指定时为空，显示为 `::`）
-- `{version}`: 服务版本（未指定时为空）
-- `{method}`: 方法名
+然后按生命周期 scope 配置 command。command 名称直接作为 `consumer` 或 `provider` 下的 key：
 
-示例：
-- `dubbo:consumer:greet.GreetService:::Greet`
-- `dubbo:consumer:com.example.UserProvider:::GetUser`
-- `dubbo:consumer:com.example.UserService:group:v1.0:CreateUser`
+```yaml
+dubbo:
+  extensions:
+    hystrix:
+      consumer:
+        "greet.GreetService:::Greet":
+          timeout: 1000
+          max-concurrent-requests: 10
+          request-volume-threshold: 5
+          sleep-window: 5000
+          error-percent-threshold: 50
+      provider:
+        "greet.GreetService:::Greet":
+          timeout: 1000
+          max-concurrent-requests: 10
+          request-volume-threshold: 5
+          sleep-window: 5000
+          error-percent-threshold: 50
+```
+
+command key 格式为 `接口:分组:版本:方法`。例如 `greet.GreetService:::Greet` 的分组和版本为空。key 中的点号和冒号需要保留；不需要增加 `commands` 层，也不需要添加 `dubbo:consumer:` 或 `dubbo:provider:` 前缀。
+
+保留键 `default` 可以为没有单独 command 配置的方法设置默认策略；具体方法的配置优先级更高：
+
+```yaml
+consumer:
+  default:
+    timeout: 3000
+    max-concurrent-requests: 200
+  "greet.GreetService:::Greet":
+    timeout: 500
+```
+
+typed API 也可以通过 `WithConfig(WithCommandName("default"), ...)` 配置默认策略。
+
+`default` 也会为具体 method 配置中省略或值为 0 的字段提供基线。例如，method 只设置 `timeout` 时，`max-concurrent-requests` 会继承 `default` 的值。字段值 `0` 表示“未设置”，无法显式配置为 0；负数会被拒绝。
+
+配置优先级为默认值、YAML、typed options。consumer YAML 只在 client 初始化时生效，provider YAML 只在 server 初始化时生效。Hystrix 不支持 instance scope。
+
+Hystrix 在进程级保存 command 配置和熔断状态。同一 scope 下使用相同 command name 的多个 client 或 server 会共享熔断器；后初始化的配置会设置 command 参数和默认策略。后续初始化未配置 `default` 时，未单独配置的方法会直接调用。
+
+## Command 参数
+
+| 参数 | 说明 | 默认值 |
+| --- | --- | ---: |
+| `timeout` | command 超时时间，单位毫秒 | 1000 |
+| `max-concurrent-requests` | 最大并发执行数 | 10 |
+| `request-volume-threshold` | 开始计算错误率前的最小请求数 | 20 |
+| `sleep-window` | 熔断打开后尝试恢复前的等待时间，单位毫秒 | 5000 |
+| `error-percent-threshold` | 触发熔断的错误百分比 | 50 |
+
+每次 `WithConfig` 配置一个 command 或保留的 `default` 项。配置多个条目时调用多次；同一个条目的 typed options 按声明顺序覆盖之前的选项和 YAML 值。

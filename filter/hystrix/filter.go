@@ -15,27 +15,18 @@
  * limitations under the License.
  */
 
-// Package hystrix provides hystrix filter.
-// To use hystrix, you need to configure commands using hystrix-go API:
-//
-//	import "github.com/afex/hystrix-go/hystrix"
-//
-//	// Resource name format: dubbo:consumer:InterfaceName:group:version:Method
-//	// Example: dubbo:consumer:com.example.GreetService:::Greet
-//	hystrix.ConfigureCommand("dubbo:consumer:com.example.GreetService:::Greet", hystrix.CommandConfig{
-//	    Timeout:                1000,
-//	    MaxConcurrentRequests:  20,
-//	    RequestVolumeThreshold: 20,
-//	    SleepWindow:            5000,
-//	    ErrorPercentThreshold:  50,
-//	})
+// Package hystrix provides a Hystrix circuit-breaker filter configured through
+// the dubbo-go extension API. Command names use the Dubbo resource format
+// interface:group:version:method.
 
 package hystrix
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 import (
@@ -52,21 +43,28 @@ import (
 )
 
 const (
-	// Filter keys
-	HystrixConsumerFilterKey = "hystrix_consumer"
-	HystrixProviderFilterKey = "hystrix_provider"
+	// Internal Hystrix command namespaces, not part of the extension config API.
+	internalProviderCommandPrefix = "dubbo:provider:"
+	internalConsumerCommandPrefix = "dubbo:consumer:"
 
-	// Prefixes for resource naming
-	DefaultProviderPrefix = "dubbo:provider:"
-	DefaultConsumerPrefix = "dubbo:consumer:"
+	// Deprecated: use constant.HystrixConsumerFilterKey.
+	HystrixConsumerFilterKey = constant.HystrixConsumerFilterKey
+	// Deprecated: use constant.HystrixProviderFilterKey.
+	HystrixProviderFilterKey = constant.HystrixProviderFilterKey
+	// Deprecated: use the internal provider namespace managed by this package.
+	DefaultProviderPrefix = internalProviderCommandPrefix
+	// Deprecated: use the internal consumer namespace managed by this package.
+	DefaultConsumerPrefix = internalConsumerCommandPrefix
 )
 
 func init() {
-	extension.SetFilter(HystrixConsumerFilterKey, newFilterConsumer)
-	extension.SetFilter(HystrixProviderFilterKey, newFilterProvider)
+	extension.MustRegisterConfig(&Config{})
+	extension.SetFilter(constant.HystrixConsumerFilterKey, newFilterConsumer)
+	extension.SetFilter(constant.HystrixProviderFilterKey, newFilterProvider)
 }
 
-// FilterError implements error interface
+// FilterError wraps an error returned by Hystrix and reports whether the
+// circuit was open for the request.
 type FilterError struct {
 	err         error
 	circuitOpen bool
@@ -76,12 +74,18 @@ func (hfError *FilterError) Error() string {
 	return hfError.err.Error()
 }
 
-// CircuitOpen returns whether the circuit is open
+// Unwrap returns the underlying Hystrix or invocation error.
+func (hfError *FilterError) Unwrap() error {
+	return hfError.err
+}
+
+// CircuitOpen reports whether the request failed because the circuit was
+// open. It is false for timeouts, concurrency rejections, and cancellations.
 func (hfError *FilterError) CircuitOpen() bool {
 	return hfError.circuitOpen
 }
 
-// NewHystrixFilterError return a FilterError instance
+// NewHystrixFilterError returns a FilterError instance.
 func NewHystrixFilterError(err error, circuitOpen bool) error {
 	return &FilterError{
 		err:         err,
@@ -96,30 +100,95 @@ type Filter struct {
 
 // Invoke is an implementation of filter, provides Hystrix pattern latency and fault tolerance
 func (f *Filter) Invoke(ctx context.Context, invoker base.Invoker, invocation base.Invocation) result.Result {
-	cmdName := getResourceName(invoker, invocation, f.isConsumer)
+	resourceName := getResourceName(invoker, invocation)
+	scope := extension.ServerScope
+	if f.isConsumer {
+		scope = extension.ClientScope
+	}
+	cmdName := internalCommandName(scope, resourceName)
+	if !ensureRuntimeCommand(scope, cmdName) {
+		return invoker.Invoke(ctx, invocation)
+	}
 
-	var res result.Result
-	err := hystrix.Do(cmdName, func() error {
-		res = invoker.Invoke(ctx, invocation)
-		return res.Error()
-	}, func(err error) error {
+	var (
+		res          result.Result
+		resMu        sync.Mutex
+		fallbackUsed bool
+	)
+	err := hystrix.DoC(ctx, cmdName, func(ctx context.Context) error {
+		invokeResult := invoker.Invoke(ctx, invocation)
+		if invokeResult == nil {
+			return errors.New("hystrix invoker returned a nil result")
+		}
+		resMu.Lock()
+		if !fallbackUsed {
+			res = invokeResult
+		}
+		resMu.Unlock()
+		return invokeResult.Error()
+	}, func(_ context.Context, err error) error {
 		// Return fallback error
-		_, isCircuitOpen := err.(hystrix.CircuitError)
+		isCircuitOpen := errors.Is(err, hystrix.ErrCircuitOpen)
 		if isCircuitOpen {
 			logger.Debugf("[Hystrix Filter] Circuit opened for %s", cmdName)
 		} else {
 			logger.Debugf("[Hystrix Filter] Hystrix fallback for %s: %v", cmdName, err)
 		}
+		resMu.Lock()
+		fallbackUsed = true
 		res = &result.RPCResult{}
 		res.SetResult(nil)
 		res.SetError(NewHystrixFilterError(err, isCircuitOpen))
+		resMu.Unlock()
 		return err
 	})
 
-	if err != nil {
-		return res
+	resMu.Lock()
+	if res == nil {
+		if err == nil {
+			err = errors.New("hystrix returned no result")
+		}
+		res = &result.RPCResult{}
+		res.SetError(NewHystrixFilterError(err, errors.Is(err, hystrix.ErrCircuitOpen)))
 	}
+	resMu.Unlock()
 	return res
+}
+
+// warnUnconfiguredLegacyCommands reports old hystrix-go settings that the
+// extension config did not declare. The caller holds hystrixConfigMu.
+func warnUnconfiguredLegacyCommands(
+	scope extension.Scope,
+	settings map[string]*hystrix.Settings,
+	configured map[string]CommandConfig,
+	hasDefault bool,
+) {
+	prefix := internalConsumerCommandPrefix
+	if scope == extension.ServerScope {
+		prefix = internalProviderCommandPrefix
+	}
+	for commandName := range settings {
+		if !strings.HasPrefix(commandName, prefix) {
+			continue
+		}
+		if _, configuredByExtension := configured[commandName]; configuredByExtension {
+			continue
+		}
+		if _, registered := hystrixRuntimeCommands[commandName]; registered {
+			continue
+		}
+		if hasDefault {
+			logger.Warnf(
+				"[Hystrix Filter] existing command %q is not declared through extension config and will use the extension default settings on invocation; migrate it to hystrix.WithConfig or YAML",
+				commandName,
+			)
+			continue
+		}
+		logger.Warnf(
+			"[Hystrix Filter] existing command %q is not declared through extension config and will be bypassed; migrate it to hystrix.WithConfig or YAML",
+			commandName,
+		)
+	}
 }
 
 // OnResponse dummy process, returns the result directly
@@ -137,15 +206,8 @@ func newFilterProvider() filter.Filter {
 	return &Filter{isConsumer: false}
 }
 
-func getResourceName(invoker base.Invoker, invocation base.Invocation, isConsumer bool) string {
+func getResourceName(invoker base.Invoker, invocation base.Invocation) string {
 	var sb strings.Builder
-
-	if isConsumer {
-		sb.WriteString(DefaultConsumerPrefix)
-	} else {
-		sb.WriteString(DefaultProviderPrefix)
-	}
-
 	// Format: interface:group:version:method
 	sb.WriteString(getColonSeparatedKey(invoker.GetURL()))
 	sb.WriteString(":")

@@ -94,6 +94,57 @@ func TestDefaultCommandAppliesToUnconfiguredMethods(t *testing.T) {
 	assert.Equal(t, 17, defaulted.MaxConcurrentRequests)
 }
 
+func TestDefaultCommandOverridesLegacySettingsAndRollbackRestoresThem(t *testing.T) {
+	isolateRuntimeConfiguration(t)
+
+	const resourceName = "hystrix-legacy-default-test:::Run"
+	internalName := internalCommandName(extension.ClientScope, resourceName)
+	hystrixgo.ConfigureCommand(internalName, hystrixgo.CommandConfig{
+		Timeout:               777,
+		MaxConcurrentRequests: 23,
+	})
+
+	config := (&Config{}).New().(*Config)
+	config.Commands[defaultCommandName] = CommandConfig{
+		Timeout:               425,
+		MaxConcurrentRequests: 17,
+	}
+	require.NoError(t, config.Init(extension.ClientScope))
+	require.True(t, ensureRuntimeCommand(extension.ClientScope, internalName))
+	settings := hystrixgo.GetCircuitSettings()[internalName]
+	assert.Equal(t, 425, int(settings.Timeout.Milliseconds()))
+	assert.Equal(t, 17, settings.MaxConcurrentRequests)
+
+	require.NoError(t, config.Rollback(extension.ClientScope))
+	settings = hystrixgo.GetCircuitSettings()[internalName]
+	require.NotNil(t, settings)
+	assert.Equal(t, 777, int(settings.Timeout.Milliseconds()))
+	assert.Equal(t, 23, settings.MaxConcurrentRequests)
+	assert.False(t, ensureRuntimeCommand(extension.ClientScope, internalName))
+}
+
+func TestDefaultCommandRollbackResetsLazyCommandSettings(t *testing.T) {
+	isolateRuntimeConfiguration(t)
+
+	const resourceName = "hystrix-lazy-rollback-test:::Run"
+	internalName := internalCommandName(extension.ClientScope, resourceName)
+	config := (&Config{}).New().(*Config)
+	config.Commands[defaultCommandName] = CommandConfig{
+		Timeout:               425,
+		MaxConcurrentRequests: 17,
+	}
+	require.NoError(t, config.Init(extension.ClientScope))
+	require.True(t, ensureRuntimeCommand(extension.ClientScope, internalName))
+	assert.Equal(t, 425, int(hystrixgo.GetCircuitSettings()[internalName].Timeout.Milliseconds()))
+
+	require.NoError(t, config.Rollback(extension.ClientScope))
+	settings, exists := hystrixgo.GetCircuitSettings()[internalName]
+	require.True(t, exists)
+	assert.Equal(t, hystrixgo.DefaultTimeout, int(settings.Timeout.Milliseconds()))
+	assert.Equal(t, hystrixgo.DefaultMaxConcurrent, settings.MaxConcurrentRequests)
+	assert.False(t, ensureRuntimeCommand(extension.ClientScope, internalName))
+}
+
 func TestConfigScopeAndCommandDefaults(t *testing.T) {
 	const resourceName = "hystrix-config-scope-test:::Run"
 	config := (&Config{}).New().(*Config)
@@ -218,6 +269,11 @@ func TestConfigRejectsInvalidValuesAndOptions(t *testing.T) {
 	config = (&Config{}).New().(*Config)
 	config.Commands["commands"] = CommandConfig{Timeout: 10}
 	require.Error(t, config.Init(extension.ClientScope))
+	for _, commandName := range []string{":::Run", "a:b:c:", ":group:v1:Run", "dubbo:consumer:service:::Run"} {
+		config = (&Config{}).New().(*Config)
+		config.Commands[commandName] = CommandConfig{Timeout: 10}
+		require.Error(t, config.Init(extension.ClientScope), commandName)
+	}
 
 	var nilConfig *Config
 	assert.Error(t, WithConfig().Apply(nilConfig))
@@ -314,11 +370,15 @@ func isolateRuntimeConfiguration(t *testing.T) {
 	for scope, state := range hystrixRuntimeDefaults {
 		defaults[scope] = state
 	}
+	hystrixRuntimeCommands = make(map[string]commandRuntimeState)
+	hystrixRuntimeDefaults = make(map[extension.Scope]runtimeDefaultState)
+	publishRuntimeSnapshotLocked()
 	hystrixConfigMu.Unlock()
 	t.Cleanup(func() {
 		hystrixConfigMu.Lock()
 		hystrixRuntimeCommands = commands
 		hystrixRuntimeDefaults = defaults
+		publishRuntimeSnapshotLocked()
 		hystrixConfigMu.Unlock()
 		hystrixgo.Flush()
 	})

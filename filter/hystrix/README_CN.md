@@ -6,7 +6,7 @@ Hystrix 过滤器为 dubbo-go consumer 和 provider 提供熔断能力。通过 
 
 ## 破坏性变更
 
-现在只有通过本扩展的 Go API 或 YAML 声明的 command 才会经过 Hystrix filter。仅调用 `hystrix.ConfigureCommand` 不再启用本 filter 中的 command；过去隐式使用 hystrix-go 默认值的方法现在会直接调用，除非配置了 `default`。请将这类 command 迁移到 `hystrix.WithConfig(...)` 或 `dubbo.extensions.hystrix` YAML 配置。
+现在只有通过本扩展的 Go API 或 YAML 声明的 command 才会经过 Hystrix filter。仅调用 `hystrix.ConfigureCommand` 不再启用本 filter 中的 command；过去隐式使用 hystrix-go 默认值的方法现在会直接调用，除非配置了 `default`。配置 `default` 后，未声明的 method 会使用 extension default；该 command name 原先通过 `hystrix.ConfigureCommand` 设置的参数会在首次调用时被替换。请将这类 command 迁移到 `hystrix.WithConfig(...)` 或 `dubbo.extensions.hystrix` YAML 配置。
 
 ## 安装
 
@@ -106,6 +106,8 @@ consumer:
 ```
 
 typed API 也可以通过 `WithConfig(WithCommandName("default"), ...)` 配置默认策略。
+
+`default` 也会为具体 method 配置中省略或值为 0 的字段提供基线。例如，method 只设置 `timeout` 时，`max-concurrent-requests` 会继承 `default` 的值。字段值 `0` 表示“未设置”，无法显式配置为 0；负数会被拒绝。
 
 配置优先级为默认值、YAML、typed options。consumer YAML 只在 client 初始化时生效，provider YAML 只在 server 初始化时生效。Hystrix 不支持 instance scope。
 

@@ -161,6 +161,7 @@ func warnUnconfiguredLegacyCommands(
 	scope extension.Scope,
 	settings map[string]*hystrix.Settings,
 	configured map[string]CommandConfig,
+	hasDefault bool,
 ) {
 	prefix := internalConsumerCommandPrefix
 	if scope == extension.ServerScope {
@@ -176,20 +177,18 @@ func warnUnconfiguredLegacyCommands(
 		if _, registered := hystrixRuntimeCommands[commandName]; registered {
 			continue
 		}
-		warnLegacyCommandOnce(commandName)
-	}
-}
-
-func warnLegacyCommandOnce(commandName string) {
-	warning, _ := hystrixLegacyWarnings.LoadOrStore(commandName, &sync.Once{})
-	warning.(*sync.Once).Do(func() {
-		if _, exists := hystrix.GetCircuitSettings()[commandName]; exists {
+		if hasDefault {
 			logger.Warnf(
-				"[Hystrix Filter] existing command %q is not declared through extension config and will be bypassed; migrate it to hystrix.WithConfig or YAML",
+				"[Hystrix Filter] existing command %q is not declared through extension config and will use the extension default settings on invocation; migrate it to hystrix.WithConfig or YAML",
 				commandName,
 			)
+			continue
 		}
-	})
+		logger.Warnf(
+			"[Hystrix Filter] existing command %q is not declared through extension config and will be bypassed; migrate it to hystrix.WithConfig or YAML",
+			commandName,
+		)
+	}
 }
 
 // OnResponse dummy process, returns the result directly

@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 import (
@@ -43,11 +44,11 @@ var (
 )
 
 var (
-	hystrixConfigMu         sync.RWMutex
+	hystrixConfigMu         sync.Mutex
 	hystrixRuntimeCommands  = make(map[string]commandRuntimeState)
 	hystrixRuntimeDefaults  = make(map[extension.Scope]runtimeDefaultState)
-	hystrixLegacyWarnings   sync.Map
 	hystrixConfigGeneration uint64
+	hystrixRuntimeSnapshot  atomic.Pointer[runtimeConfigSnapshot]
 )
 
 // Config stores a Hystrix configuration for each Dubbo service method.
@@ -81,9 +82,21 @@ type commandRuntimeState struct {
 }
 
 type runtimeDefaultState struct {
+	command          hystrixgo.CommandConfig
+	enabled          bool
+	generation       uint64
+	rollbackCommands map[string]commandRollbackState
+}
+
+type runtimeDefaultSnapshot struct {
 	command    hystrixgo.CommandConfig
 	enabled    bool
 	generation uint64
+}
+
+type runtimeConfigSnapshot struct {
+	commands map[string]commandRuntimeState
+	defaults map[extension.Scope]runtimeDefaultSnapshot
 }
 
 // CommandConfig configures one Hystrix command. Zero values use hystrix-go's
@@ -172,12 +185,13 @@ func (c *Config) Init(scope extension.Scope) error {
 		rollbackState.hadPreviousDefault = true
 	}
 	hystrixRuntimeDefaults[scope] = runtimeDefaultState{
-		command:    toHystrixCommandConfig(c.defaults),
-		enabled:    hasDefault,
-		generation: generation,
+		command:          toHystrixCommandConfig(c.defaults),
+		enabled:          hasDefault,
+		generation:       generation,
+		rollbackCommands: rollbackState.commands,
 	}
 	existingSettings := hystrixgo.GetCircuitSettings()
-	warnUnconfiguredLegacyCommands(scope, existingSettings, configured)
+	warnUnconfiguredLegacyCommands(scope, existingSettings, configured, hasDefault)
 	for _, commandName := range commandNames {
 		if commandName == defaultCommandName {
 			continue
@@ -202,6 +216,7 @@ func (c *Config) Init(scope extension.Scope) error {
 		c.rollbackStates = make(map[extension.Scope]configRollbackState)
 	}
 	c.rollbackStates[scope] = rollbackState
+	publishRuntimeSnapshotLocked()
 	return nil
 }
 
@@ -246,12 +261,8 @@ func (c *Config) Rollback(scope extension.Scope) error {
 			delete(hystrixRuntimeDefaults, scope)
 		}
 	}
-	for commandName, commandState := range hystrixRuntimeCommands {
-		if commandState.scope == scope && commandState.fromDefault && commandState.generation == rollbackState.generation {
-			delete(hystrixRuntimeCommands, commandName)
-		}
-	}
 	delete(c.rollbackStates, scope)
+	publishRuntimeSnapshotLocked()
 	return nil
 }
 
@@ -284,41 +295,52 @@ func toHystrixCommandConfig(command CommandConfig) hystrixgo.CommandConfig {
 }
 
 func ensureRuntimeCommand(scope extension.Scope, commandName string) bool {
-	hystrixConfigMu.RLock()
-	registration, exists := hystrixRuntimeCommands[commandName]
-	if exists && !registration.fromDefault {
-		hystrixConfigMu.RUnlock()
-		return true
-	}
-	defaults, hasDefault := hystrixRuntimeDefaults[scope]
-	if !hasDefault || !defaults.enabled {
-		hystrixConfigMu.RUnlock()
-		warnLegacyCommandOnce(commandName)
+	if snapshot := hystrixRuntimeSnapshot.Load(); snapshot != nil {
+		registration, exists := snapshot.commands[commandName]
+		if exists && !registration.fromDefault {
+			return true
+		}
+		defaults, hasDefault := snapshot.defaults[scope]
+		if !hasDefault || !defaults.enabled {
+			return false
+		}
+		if exists && registration.fromDefault && registration.generation == defaults.generation {
+			return true
+		}
+	} else {
 		return false
 	}
-	if exists && registration.fromDefault && registration.generation == defaults.generation {
-		hystrixConfigMu.RUnlock()
-		return true
-	}
-	hystrixConfigMu.RUnlock()
 
 	// Only the first invocation of an unconfigured method takes the write lock
 	// to install the scope's default command settings.
 	hystrixConfigMu.Lock()
 	defer hystrixConfigMu.Unlock()
-	registration, exists = hystrixRuntimeCommands[commandName]
+	registration, exists := hystrixRuntimeCommands[commandName]
 	if exists && !registration.fromDefault {
 		return true
 	}
-	defaults, hasDefault = hystrixRuntimeDefaults[scope]
+	defaults, hasDefault := hystrixRuntimeDefaults[scope]
 	if !hasDefault || !defaults.enabled {
 		if exists {
 			delete(hystrixRuntimeCommands, commandName)
+			publishRuntimeSnapshotLocked()
 		}
 		return false
 	}
 	if exists && registration.fromDefault && registration.generation == defaults.generation {
 		return true
+	}
+	state := commandRollbackState{configuredWith: defaults.command}
+	if previous, exists := hystrixgo.GetCircuitSettings()[commandName]; exists {
+		state.previousSettings = commandConfigFromSettings(previous)
+		state.hadPreviousSettings = true
+	}
+	if exists {
+		state.previousRuntime = registration
+		state.hadPreviousRuntime = true
+	}
+	if defaults.rollbackCommands != nil {
+		defaults.rollbackCommands[commandName] = state
 	}
 	hystrixgo.ConfigureCommand(commandName, defaults.command)
 	hystrixRuntimeCommands[commandName] = commandRuntimeState{
@@ -326,7 +348,28 @@ func ensureRuntimeCommand(scope extension.Scope, commandName string) bool {
 		fromDefault: true,
 		scope:       scope,
 	}
+	publishRuntimeSnapshotLocked()
 	return true
+}
+
+// publishRuntimeSnapshotLocked publishes copies of the runtime maps for the
+// filter hot path. The caller must hold hystrixConfigMu.
+func publishRuntimeSnapshotLocked() {
+	snapshot := &runtimeConfigSnapshot{
+		commands: make(map[string]commandRuntimeState, len(hystrixRuntimeCommands)),
+		defaults: make(map[extension.Scope]runtimeDefaultSnapshot, len(hystrixRuntimeDefaults)),
+	}
+	for commandName, state := range hystrixRuntimeCommands {
+		snapshot.commands[commandName] = state
+	}
+	for scope, state := range hystrixRuntimeDefaults {
+		snapshot.defaults[scope] = runtimeDefaultSnapshot{
+			command:    state.command,
+			enabled:    state.enabled,
+			generation: state.generation,
+		}
+	}
+	hystrixRuntimeSnapshot.Store(snapshot)
 }
 
 func (c *Config) FilterNames(scope extension.Scope) []string {
@@ -369,8 +412,12 @@ func validateCommandName(commandName string) error {
 	if commandName == defaultCommandName {
 		return nil
 	}
-	if strings.Count(commandName, ":") != 3 {
+	parts := strings.Split(commandName, ":")
+	if len(parts) != 4 {
 		return fmt.Errorf("hystrix command %q must use interface:group:version:method format", commandName)
+	}
+	if strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[3]) == "" {
+		return fmt.Errorf("hystrix command %q must include an interface and method", commandName)
 	}
 	return nil
 }

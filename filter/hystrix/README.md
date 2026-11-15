@@ -6,7 +6,7 @@ The Hystrix filter adds circuit breaking to dubbo-go consumers and providers. Co
 
 ## Breaking change
 
-The filter now applies only to commands declared through this extension's Go or YAML configuration. Existing `hystrix.ConfigureCommand` calls alone no longer enable a command in this filter, and methods that previously received hystrix-go's implicit defaults now pass through unless `default` is configured. Migrate those commands to `hystrix.WithConfig(...)` or the `dubbo.extensions.hystrix` YAML configuration.
+The filter now applies only to commands declared through this extension's Go or YAML configuration. Existing `hystrix.ConfigureCommand` calls alone no longer enable a command in this filter, and methods that previously received hystrix-go's implicit defaults now pass through unless `default` is configured. When `default` is configured, an undeclared method uses that extension default; any existing `hystrix.ConfigureCommand` settings for its command name are replaced on its first invocation. Migrate those commands to `hystrix.WithConfig(...)` or the `dubbo.extensions.hystrix` YAML configuration.
 
 ## Installation
 
@@ -106,6 +106,8 @@ consumer:
 ```
 
 The typed API can configure the same default with `WithConfig(WithCommandName("default"), ...)`.
+
+The `default` entry also supplies the fallback for each omitted or zero-valued field in method-specific entries. For example, a method entry that sets only `timeout` inherits `max-concurrent-requests` from `default`. A value of `0` means "not set" and cannot be configured explicitly; negative values are rejected.
 
 Configuration precedence is defaults, YAML, then typed options. Consumer YAML is initialized for clients, and provider YAML is initialized for servers. Hystrix does not support the instance scope.
 
